@@ -1,12 +1,12 @@
 #!/bin/zsh
 set -euo pipefail
 
-ROOT_DIR="${0:A:h}/.."
-SOURCE_FILE="$ROOT_DIR/macOS/ChatGPTQuotaPet.swift"
-INFO_FILE="$ROOT_DIR/macOS/Info.plist"
-ICON_FILE="$ROOT_DIR/macOS/AppIcon.icns"
-APP_DIR="$ROOT_DIR/ChatGPTQuotaPet.app"
-BUILD_DIR="$ROOT_DIR/macOS/.build"
+ROOT_DIR="${0:A:h}/../.."
+SOURCE_FILE="$ROOT_DIR/Mac/Codings/ChatGPTQuotaPet.swift"
+INFO_FILE="$ROOT_DIR/Mac/Codings/Info.plist"
+ICON_FILE="$ROOT_DIR/Mac/Codings/AppIcon.icns"
+APP_DIR="$ROOT_DIR/Mac/Packages/ChatGPTQuotaPet.app"
+BUILD_DIR="$ROOT_DIR/Mac/Codings/.build"
 ARCH="$(uname -m)"
 TARGET="${ARCH}-apple-macosx13.0"
 

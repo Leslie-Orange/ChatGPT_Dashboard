@@ -4,7 +4,7 @@
 
 - `AppIcon.png`：1024 × 1024 RGBA 母图，外围透明。
 - `AppIcon.icns`：使用 Apple `iconutil` 封装，包含 16、32、128、256、512 点的 1x 和 2x 表示。
-- 重建命令：`./macOS/build-icon.sh`。应用打包脚本 `./macOS/build-mac.sh` 会复制 ICNS 到应用资源目录。
+- 重建命令：`./Mac/Codings/build-icon.sh`。应用打包脚本 `./Mac/Codings/build-mac.sh` 会复制 ICNS 到应用资源目录。
 - 这是兼容现有 AppKit 应用的静态 ICNS，不是 Icon Composer 的动态分层图标。
 
 使用内置 imagegen 生成画面；生成工具未返回 Alpha 通道，因此封装时使用 Core Graphics 按连续圆角轮廓裁切背景，并缩放为标准母图尺寸。
