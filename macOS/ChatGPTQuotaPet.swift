@@ -817,11 +817,11 @@ final class QuotaStatusView: NSView {
     var onLeftClick: (() -> Void)?
     var onRightClick: (() -> Void)?
 
-    private let iconLeading: CGFloat = 2
-    private let labelLeading: CGFloat = 23
-    private let labelTrailing: CGFloat = 6
-    private let labelSafetyPadding: CGFloat = 8
-    private let minimumWidth: CGFloat = 84
+    private let iconLeading: CGFloat = 1
+    private let iconSize: CGFloat = 16
+    private let labelLeading: CGFloat = 17
+    private let labelTrailing: CGFloat = 1
+    private let textFieldCellInset: CGFloat = 4
     private let iconView = NSImageView()
     private let primaryLabel = NSTextField(labelWithString: "5h —")
     private let secondaryLabel = NSTextField(labelWithString: "7d —")
@@ -834,6 +834,7 @@ final class QuotaStatusView: NSView {
         setAccessibilityLabel("Codex 剩余额度")
 
         iconView.image = NSImage(systemSymbolName: "gauge.medium", accessibilityDescription: "Codex 额度")
+        iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
         iconView.imageScaling = .scaleProportionallyUpOrDown
         iconView.contentTintColor = .secondaryLabelColor
         addSubview(iconView)
@@ -842,7 +843,8 @@ final class QuotaStatusView: NSView {
             label.font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .medium)
             label.textColor = .secondaryLabelColor
             label.alignment = .left
-            label.lineBreakMode = .byTruncatingTail
+            label.lineBreakMode = .byClipping
+            label.cell?.wraps = false
             label.backgroundColor = .clear
             label.isBordered = false
             label.isEditable = false
@@ -858,24 +860,26 @@ final class QuotaStatusView: NSView {
 
     override func layout() {
         super.layout()
-        iconView.frame = NSRect(x: iconLeading, y: 3, width: 18, height: 18)
+        iconView.frame = NSRect(x: iconLeading, y: 3, width: iconSize, height: iconSize)
         let labelWidth = max(20, bounds.width - labelLeading - labelTrailing)
         primaryLabel.frame = NSRect(x: labelLeading, y: 1, width: labelWidth, height: 10)
         secondaryLabel.frame = NSRect(x: labelLeading, y: 11, width: labelWidth, height: 10)
     }
 
     var preferredWidth: CGFloat {
-        let font = primaryLabel.font ?? NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .medium)
-        let labelWidths = [
+        let labelWidth = [
             primaryLabel.stringValue,
             secondaryLabel.stringValue,
             "5h 100%",
             "7d 100%"
-        ].map { ($0 as NSString).size(withAttributes: [.font: font]).width }
-        return max(
-            minimumWidth,
-            ceil(labelLeading + (labelWidths.max() ?? 0) + labelTrailing + labelSafetyPadding)
-        )
+        ].map(measuredLabelWidth).max() ?? 0
+        return ceil(labelLeading + labelWidth + labelTrailing)
+    }
+
+    private func measuredLabelWidth(_ string: String) -> CGFloat {
+        let font = primaryLabel.font ?? NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .medium)
+        let textWidth = (string as NSString).size(withAttributes: [.font: font]).width
+        return ceil(textWidth + textFieldCellInset)
     }
 
     func update(primary: Double?, secondary: Double?, sourceName: String?) {
