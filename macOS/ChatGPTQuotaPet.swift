@@ -89,8 +89,9 @@ enum SnapshotLoader {
         .sorted { modificationDate($0) > modificationDate($1) }
         .prefix(24)
 
+        var newest: QuotaSnapshot?
         for url in urls {
-            for line in readTailLines(url: url) where line.contains("\"rate_limits\"") {
+            for line in readTailLines(url: url) where line.contains("\"rate_limits\"") || line.contains("\"rateLimits\"") {
                 guard let data = line.data(using: .utf8),
                       let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let payload = event["payload"] as? [String: Any],
@@ -98,11 +99,13 @@ enum SnapshotLoader {
 
                 let sampledAt = parseDate(event["timestamp"]) ?? modificationDate(url)
                 if let snapshot = QuotaParser.snapshot(from: limits, sampledAt: sampledAt, sourceName: url.lastPathComponent) {
-                    return snapshot
+                    if newest == nil || snapshot.sampledAt > newest!.sampledAt {
+                        newest = snapshot
+                    }
                 }
             }
         }
-        return nil
+        return newest
     }
 
     private static func modificationDate(_ url: URL) -> Date {
@@ -376,16 +379,25 @@ enum QuotaFormatter {
         return "\(rounded) 分钟窗口剩余"
     }
 
-    static func reset(_ timestamp: TimeInterval?) -> String {
-        guard let timestamp else { return "重置时间未知" }
-        let seconds = timestamp - Date().timeIntervalSince1970
+    static func resetDate(_ timestamp: TimeInterval?, timeZone: TimeZone = .current) -> String {
+        guard let timestamp, timestamp.isFinite, timestamp > 0 else { return "重置时间未知" }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "MM-dd HH:mm"
+        return "重置于 " + formatter.string(from: Date(timeIntervalSince1970: timestamp))
+    }
+
+    static func reset(_ timestamp: TimeInterval?, now: Date = Date()) -> String {
+        guard let timestamp, timestamp.isFinite, timestamp > 0 else { return "重置时间未知" }
+        let seconds = timestamp - now.timeIntervalSince1970
         if seconds <= 0 { return "窗口已到点，等待刷新" }
         let minutes = Int(ceil(seconds / 60))
         if minutes < 60 { return "约 \(minutes) 分钟后重置" }
         let days = minutes / 1440
         let hours = (minutes % 1440) / 60
         let rest = minutes % 60
-        if days > 0 { return "约 \(days) 天 \(hours) 小时后重置" }
+        if days > 0 { return "约 \(days) 天 \(hours) 小时 \(rest) 分钟后重置" }
         return "约 \(hours) 小时 \(rest) 分钟后重置"
     }
 
@@ -490,11 +502,17 @@ private enum QuotaDesign {
 
 private struct LiquidGlassBackground: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
     var body: some View {
         if reduceTransparency {
             Color(nsColor: .windowBackgroundColor)
+        } else if #available(macOS 26.0, *) {
+            // NSPopover supplies the system Liquid Glass surface on modern macOS.
+            // Keep the hosting view transparent so the system can tune the glass
+            // for light/dark appearance and the current desktop behind the popover.
+            Color.clear
         } else {
-            Rectangle().fill(.regularMaterial)
+            Rectangle().fill(.ultraThinMaterial)
         }
     }
 }
@@ -504,12 +522,13 @@ private struct GlassIconButton: View {
     let accessibilityLabel: String
     let action: () -> Void
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var button: some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: 13, weight: .medium))
-                .frame(width: 24, height: 28)
+                .font(.system(size: 13, weight: .semibold))
+                .frame(width: 30, height: 30)
         }
         .accessibilityLabel(accessibilityLabel)
         .help(accessibilityLabel)
@@ -517,7 +536,17 @@ private struct GlassIconButton: View {
 
     var body: some View {
         if #available(macOS 26.0, *), !reduceTransparency {
-            button.buttonStyle(.glass).buttonBorderShape(.circle)
+            if #available(macOS 27.0, *), !reduceMotion {
+                // macOS 27 adds the subtle responsive “bounce” to interactive
+                // glass. Limit it to controls, where the feedback is useful.
+                button
+                    .buttonStyle(.plain)
+                    .glassEffect(.regular.interactive(), in: Circle())
+            } else {
+                button
+                    .buttonStyle(.plain)
+                    .glassEffect(.regular, in: Circle())
+            }
         } else {
             button.buttonStyle(.bordered)
         }
@@ -536,7 +565,7 @@ private struct QuotaToolbar: View {
     }
     var body: some View {
         if #available(macOS 26.0, *) {
-            GlassEffectContainer(spacing: 8) { controls }
+            GlassEffectContainer(spacing: 10) { controls }
         } else { controls }
     }
 }
@@ -580,6 +609,7 @@ private struct QuotaRow: View {
     let fallbackWindowMinutes: Double
     let ratePeriodMinutes: Double
     let rateUnit: String
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     private var tint: Color {
         guard let remaining = window.remaining else { return Color.gray.opacity(0.55) }
@@ -601,7 +631,7 @@ private struct QuotaRow: View {
         )
     }
 
-    var body: some View {
+    private var rowContent: some View {
         HStack(spacing: 13) {
             QuotaRing(label: badge, progress: progress, tint: tint)
 
@@ -610,10 +640,15 @@ private struct QuotaRow: View {
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
-                Text(QuotaFormatter.reset(window.resetAt))
+                Text(QuotaFormatter.resetDate(window.resetAt))
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .help("按本机时区显示接口返回的重置时间")
+                Text(QuotaFormatter.reset(window.resetAt))
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Spacer(minLength: 6)
@@ -630,8 +665,28 @@ private struct QuotaRow: View {
                     .help("按当前窗口已用额度与已过时长折算")
             }
         }
-        .padding(.vertical, 18)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
         .accessibilityElement(children: .combine)
+    }
+
+    var body: some View {
+        if #available(macOS 26.0, *), !reduceTransparency {
+            // Keep the data legible and let the two rows carry the custom glass.
+            // The row itself is deliberately non-interactive: macOS 27's
+            // interactive glass is reserved for controls.
+            rowContent.glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        } else if reduceTransparency {
+            rowContent.background(
+                Color(nsColor: .controlBackgroundColor),
+                in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+            )
+        } else {
+            rowContent.background(
+                .ultraThinMaterial,
+                in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+            )
+        }
     }
 }
 
@@ -639,6 +694,7 @@ struct QuotaView: View {
     @ObservedObject var model: QuotaModel
     let refresh: () -> Void
     let dismiss: () -> Void
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     private let placeholder = QuotaWindow(remaining: nil, used: nil, resetAt: nil, windowMinutes: nil)
 
@@ -658,6 +714,61 @@ struct QuotaView: View {
         currentSnapshot?.sourceName == "app-server"
             ? Color(red: 0.08, green: 0.71, blue: 0.54)
             : Color(red: 0.96, green: 0.60, blue: 0.06)
+    }
+
+    @ViewBuilder
+    private var quotaRows: some View {
+        if #available(macOS 26.0, *), !reduceTransparency {
+            GlassEffectContainer(spacing: 12) {
+                VStack(spacing: 10) {
+                    quotaRow(
+                        title: "5 小时窗口剩余", badge: "5h",
+                        window: currentSnapshot?.primary ?? placeholder,
+                        fallbackWindowMinutes: 5 * 60,
+                        ratePeriodMinutes: 30, rateUnit: "30min"
+                    )
+                    quotaRow(
+                        title: "7 天窗口剩余", badge: "7d",
+                        window: currentSnapshot?.secondary ?? placeholder,
+                        fallbackWindowMinutes: 7 * 24 * 60,
+                        ratePeriodMinutes: 24 * 60, rateUnit: "天"
+                    )
+                }
+            }
+        } else {
+            VStack(spacing: 8) {
+                quotaRow(
+                    title: "5 小时窗口剩余", badge: "5h",
+                    window: currentSnapshot?.primary ?? placeholder,
+                    fallbackWindowMinutes: 5 * 60,
+                    ratePeriodMinutes: 30, rateUnit: "30min"
+                )
+                quotaRow(
+                    title: "7 天窗口剩余", badge: "7d",
+                    window: currentSnapshot?.secondary ?? placeholder,
+                    fallbackWindowMinutes: 7 * 24 * 60,
+                    ratePeriodMinutes: 24 * 60, rateUnit: "天"
+                )
+            }
+        }
+    }
+
+    private func quotaRow(
+        title: String,
+        badge: String,
+        window: QuotaWindow,
+        fallbackWindowMinutes: Double,
+        ratePeriodMinutes: Double,
+        rateUnit: String
+    ) -> some View {
+        QuotaRow(
+            title: title,
+            badge: badge,
+            window: window,
+            fallbackWindowMinutes: fallbackWindowMinutes,
+            ratePeriodMinutes: ratePeriodMinutes,
+            rateUnit: rateUnit
+        )
     }
 
     var body: some View {
@@ -685,19 +796,7 @@ struct QuotaView: View {
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.secondary)
 
-                QuotaRow(
-                    title: "5 小时窗口剩余", badge: "5h",
-                    window: currentSnapshot?.primary ?? placeholder,
-                    fallbackWindowMinutes: 5 * 60,
-                    ratePeriodMinutes: 30, rateUnit: "30min"
-                )
-                Divider().opacity(0.5)
-                QuotaRow(
-                    title: "7 天窗口剩余", badge: "7d",
-                    window: currentSnapshot?.secondary ?? placeholder,
-                    fallbackWindowMinutes: 7 * 24 * 60,
-                    ratePeriodMinutes: 24 * 60, rateUnit: "天"
-                )
+                quotaRows
                 Spacer(minLength: 8)
                 HStack(alignment: .top, spacing: 6) {
                     Circle().fill(statusTint).frame(width: 6, height: 6).padding(.top, 4)
@@ -1008,6 +1107,10 @@ func runProbe() -> Int32 {
             "PlanType": snapshot.planType as Any,
             "FiveHourRemain": snapshot.primary.remaining as Any,
             "WeeklyRemain": snapshot.secondary.remaining as Any,
+            "FiveHourResetsAt": snapshot.primary.resetAt as Any,
+            "WeeklyResetsAt": snapshot.secondary.resetAt as Any,
+            "WeeklyResetDate": QuotaFormatter.resetDate(snapshot.secondary.resetAt),
+            "WeeklyResetDisplay": QuotaFormatter.reset(snapshot.secondary.resetAt),
             "SampledAt": ISO8601DateFormatter().string(from: snapshot.sampledAt),
             "SourceName": snapshot.sourceName
         ]
@@ -1026,6 +1129,10 @@ func runProbe() -> Int32 {
             "PlanType": fallback.planType as Any,
             "FiveHourRemain": fallback.primary.remaining as Any,
             "WeeklyRemain": fallback.secondary.remaining as Any,
+            "FiveHourResetsAt": fallback.primary.resetAt as Any,
+            "WeeklyResetsAt": fallback.secondary.resetAt as Any,
+            "WeeklyResetDate": QuotaFormatter.resetDate(fallback.secondary.resetAt),
+            "WeeklyResetDisplay": QuotaFormatter.reset(fallback.secondary.resetAt),
             "SampledAt": ISO8601DateFormatter().string(from: fallback.sampledAt),
             "SourceName": fallback.sourceName
         ]
