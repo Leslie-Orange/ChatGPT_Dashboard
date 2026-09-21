@@ -818,8 +818,8 @@ final class QuotaStatusView: NSView {
     var onRightClick: (() -> Void)?
 
     private let iconLeading: CGFloat = 1
-    private let iconSize: CGFloat = 16
-    private let labelLeading: CGFloat = 17
+    private let iconSize: CGFloat = 20
+    private let labelLeading: CGFloat = 22
     private let labelTrailing: CGFloat = 1
     private let textFieldCellInset: CGFloat = 4
     private let iconView = NSImageView()
@@ -834,7 +834,7 @@ final class QuotaStatusView: NSView {
         setAccessibilityLabel("Codex 剩余额度")
 
         iconView.image = NSImage(systemSymbolName: "gauge.medium", accessibilityDescription: "Codex 额度")
-        iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
+        iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 18, weight: .medium)
         iconView.imageScaling = .scaleProportionallyUpOrDown
         iconView.contentTintColor = .secondaryLabelColor
         addSubview(iconView)
@@ -860,7 +860,7 @@ final class QuotaStatusView: NSView {
 
     override func layout() {
         super.layout()
-        iconView.frame = NSRect(x: iconLeading, y: 3, width: iconSize, height: iconSize)
+        iconView.frame = NSRect(x: iconLeading, y: 1, width: iconSize, height: iconSize)
         let labelWidth = max(20, bounds.width - labelLeading - labelTrailing)
         primaryLabel.frame = NSRect(x: labelLeading, y: 1, width: labelWidth, height: 10)
         secondaryLabel.frame = NSRect(x: labelLeading, y: 11, width: labelWidth, height: 10)
