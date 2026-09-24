@@ -15,11 +15,13 @@ Windows 版本保留 macOS 版本的额度读取、快照回退、详情弹窗�
 
 ## macOS
 
-macOS 详情页采用内容优先的布局：两行额度直接展示剩余比例、重置时间和消耗速率，底部保留实时／快照状态。macOS 26 及以上的刷新与关闭按钮使用原生 Liquid Glass，旧系统回退到标准按钮。支持系统深浅色、减少透明度和减少动态效果设置，⌘R 可刷新额度。
+macOS 详情页采用内容优先的 Liquid Glass 布局：系统弹窗提供玻璃背景，刷新与关闭控件使用玻璃效果；两行额度直接排在内容层，通过细分隔线区分，显示剩余比例、重置时间和消耗速率，底部保留实时／快照状态。macOS 13–25 使用系统材质与标准按钮。支持系统深浅色、减少透明度和减少动态效果设置，⌘R 可刷新额度。
 
 原有菜单栏项目和 Swift/AppKit 构建方式保持不变；可使用 `--show-details` 启动参数自动展开详情页。
 
 ## 启动
+
+当前 macOS 安装包为 `Mac/Packages/ChatGPTQuotaPet-1.4-LiquidGlass.dmg`。打开磁盘映像后，将 `ChatGPTQuotaPet.app` 拖到 `Applications` 即可安装。
 
 双击 `Mac/Codings/Start-ChatGPTQuotaPet.command`。首次运行会编译并打开 `Mac/Packages/ChatGPTQuotaPet.app`；之后也可以直接双击 `Mac/Packages/ChatGPTQuotaPet.app`。
 

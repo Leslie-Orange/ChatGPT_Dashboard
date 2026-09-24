@@ -495,7 +495,7 @@ final class QuotaModel: ObservableObject {
 
 private enum QuotaDesign {
     static let width: CGFloat = 400
-    static let height: CGFloat = 344
+    static let height: CGFloat = 326
     static let inset: CGFloat = 24
     static let accent = Color.accentColor
 }
@@ -522,7 +522,6 @@ private struct GlassIconButton: View {
     let accessibilityLabel: String
     let action: () -> Void
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var button: some View {
         Button(action: action) {
@@ -536,17 +535,9 @@ private struct GlassIconButton: View {
 
     var body: some View {
         if #available(macOS 26.0, *), !reduceTransparency {
-            if #available(macOS 27.0, *), !reduceMotion {
-                // macOS 27 adds the subtle responsive “bounce” to interactive
-                // glass. Limit it to controls, where the feedback is useful.
-                button
-                    .buttonStyle(.plain)
-                    .glassEffect(.regular.interactive(), in: Circle())
-            } else {
-                button
-                    .buttonStyle(.plain)
-                    .glassEffect(.regular, in: Circle())
-            }
+            button
+                .buttonStyle(.plain)
+                .glassEffect(.regular.interactive(), in: Circle())
         } else {
             button.buttonStyle(.bordered)
         }
@@ -579,17 +570,10 @@ private struct QuotaRing: View {
     var body: some View {
         ZStack {
             Circle()
-                .stroke(Color.primary.opacity(0.10), lineWidth: 5)
+                .stroke(Color.primary.opacity(0.12), lineWidth: 5)
             Circle()
-                // Advance the consumed edge clockwise from 12 o’clock.
-                .trim(from: 1 - progress, to: 1)
-                .stroke(
-                    AngularGradient(
-                        colors: [tint.opacity(0.45), tint, tint.opacity(0.72)],
-                        center: .center
-                    ),
-                    style: StrokeStyle(lineWidth: 5, lineCap: .round)
-                )
+                .trim(from: 0, to: progress)
+                .stroke(tint, style: StrokeStyle(lineWidth: 5, lineCap: .round))
                 .rotationEffect(.degrees(-90))
 
             Text(label)
@@ -609,7 +593,6 @@ private struct QuotaRow: View {
     let fallbackWindowMinutes: Double
     let ratePeriodMinutes: Double
     let rateUnit: String
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     private var tint: Color {
         guard let remaining = window.remaining else { return Color.gray.opacity(0.55) }
@@ -632,10 +615,10 @@ private struct QuotaRow: View {
     }
 
     private var rowContent: some View {
-        HStack(spacing: 13) {
+        HStack(spacing: 14) {
             QuotaRing(label: badge, progress: progress, tint: tint)
 
-            VStack(alignment: .leading, spacing: 5) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(QuotaFormatter.caption(minutes: window.windowMinutes, fallback: title))
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .foregroundStyle(.primary)
@@ -655,9 +638,11 @@ private struct QuotaRow: View {
 
             VStack(alignment: .trailing, spacing: 3) {
                 Text(QuotaFormatter.percent(window.remaining))
-                    .font(.system(size: 32, weight: .semibold, design: .rounded))
+                    .font(.system(size: 30, weight: .semibold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(.primary)
+                    .minimumScaleFactor(0.8)
+                    .lineLimit(1)
                 Text(consumptionRate)
                     .font(.system(size: 10, weight: .semibold, design: .rounded))
                     .monospacedDigit()
@@ -665,28 +650,12 @@ private struct QuotaRow: View {
                     .help("按当前窗口已用额度与已过时长折算")
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
+        .padding(.vertical, 13)
         .accessibilityElement(children: .combine)
     }
 
     var body: some View {
-        if #available(macOS 26.0, *), !reduceTransparency {
-            // Keep the data legible and let the two rows carry the custom glass.
-            // The row itself is deliberately non-interactive: macOS 27's
-            // interactive glass is reserved for controls.
-            rowContent.glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        } else if reduceTransparency {
-            rowContent.background(
-                Color(nsColor: .controlBackgroundColor),
-                in: RoundedRectangle(cornerRadius: 18, style: .continuous)
-            )
-        } else {
-            rowContent.background(
-                .ultraThinMaterial,
-                in: RoundedRectangle(cornerRadius: 18, style: .continuous)
-            )
-        }
+        rowContent
     }
 }
 
@@ -694,7 +663,6 @@ struct QuotaView: View {
     @ObservedObject var model: QuotaModel
     let refresh: () -> Void
     let dismiss: () -> Void
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     private let placeholder = QuotaWindow(remaining: nil, used: nil, resetAt: nil, windowMinutes: nil)
 
@@ -716,40 +684,21 @@ struct QuotaView: View {
             : Color(red: 0.96, green: 0.60, blue: 0.06)
     }
 
-    @ViewBuilder
     private var quotaRows: some View {
-        if #available(macOS 26.0, *), !reduceTransparency {
-            GlassEffectContainer(spacing: 12) {
-                VStack(spacing: 10) {
-                    quotaRow(
-                        title: "5 小时窗口剩余", badge: "5h",
-                        window: currentSnapshot?.primary ?? placeholder,
-                        fallbackWindowMinutes: 5 * 60,
-                        ratePeriodMinutes: 30, rateUnit: "30min"
-                    )
-                    quotaRow(
-                        title: "7 天窗口剩余", badge: "7d",
-                        window: currentSnapshot?.secondary ?? placeholder,
-                        fallbackWindowMinutes: 7 * 24 * 60,
-                        ratePeriodMinutes: 24 * 60, rateUnit: "天"
-                    )
-                }
-            }
-        } else {
-            VStack(spacing: 8) {
-                quotaRow(
-                    title: "5 小时窗口剩余", badge: "5h",
-                    window: currentSnapshot?.primary ?? placeholder,
-                    fallbackWindowMinutes: 5 * 60,
-                    ratePeriodMinutes: 30, rateUnit: "30min"
-                )
-                quotaRow(
-                    title: "7 天窗口剩余", badge: "7d",
-                    window: currentSnapshot?.secondary ?? placeholder,
-                    fallbackWindowMinutes: 7 * 24 * 60,
-                    ratePeriodMinutes: 24 * 60, rateUnit: "天"
-                )
-            }
+        VStack(spacing: 0) {
+            quotaRow(
+                title: "5 小时窗口剩余", badge: "5h",
+                window: currentSnapshot?.primary ?? placeholder,
+                fallbackWindowMinutes: 5 * 60,
+                ratePeriodMinutes: 30, rateUnit: "30min"
+            )
+            Divider().padding(.leading, 66)
+            quotaRow(
+                title: "7 天窗口剩余", badge: "7d",
+                window: currentSnapshot?.secondary ?? placeholder,
+                fallbackWindowMinutes: 7 * 24 * 60,
+                ratePeriodMinutes: 24 * 60, rateUnit: "天"
+            )
         }
     }
 
@@ -786,7 +735,7 @@ struct QuotaView: View {
                     Spacer()
                     QuotaToolbar(refresh: refresh, dismiss: dismiss)
                 }
-                .padding(.bottom, 20)
+                .padding(.bottom, 18)
 
                 HStack {
                     Text("额度窗口")
@@ -795,9 +744,11 @@ struct QuotaView: View {
                 }
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.secondary)
+                .padding(.bottom, 2)
 
                 quotaRows
-                Spacer(minLength: 8)
+                Spacer(minLength: 4)
+                Divider().padding(.bottom, 10)
                 HStack(alignment: .top, spacing: 6) {
                     Circle().fill(statusTint).frame(width: 6, height: 6).padding(.top, 4)
                     Text(model.footer)
