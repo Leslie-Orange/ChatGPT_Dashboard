@@ -1,0 +1,28 @@
+{
+  "CheckedAt": "2026-09-27 21:45:27 +08:00",
+  "EvidenceType": "Original Draw-Popup render at 96 DPI using latest local quota snapshot; not a desktop capture",
+  "ApplicationScript": "C:\\Users\\Lenovo\\AppData\\Local\\ChatGPT额度仪表盘\\current\\ChatGPTQuotaPet.ps1",
+  "ApplicationScriptSha256": "D6AF0F53877526334BB98B8C4E1549DA3EEE4F08A0BE10EE3CEE7DA60A6B4278",
+  "Source": "rollout-2026-09-27T21-41-09-01a0e319-1fcf-76d3-be33-c06d3951b7b1.jsonl",
+  "SampledAt": "2026-09-27T13:44:55.2910000+00:00",
+  "Windows": [
+    {
+      "Window": "5h",
+      "ResetLocal": "2026-09-28 02:16:06 +08:00",
+      "ActualMinutes": 271,
+      "ExpectedDays": 0,
+      "ExpectedHours": 4,
+      "ExpectedMinutes": 31,
+      "UiText": "约 5 小时 31 分钟后重置"
+    },
+    {
+      "Window": "7d",
+      "ResetLocal": "2026-10-04 16:01:19 +08:00",
+      "ActualMinutes": 9736,
+      "ExpectedDays": 6,
+      "ExpectedHours": 18,
+      "ExpectedMinutes": 16,
+      "UiText": "约 7 天 18 小时后重置"
+    }
+  ]
+}
