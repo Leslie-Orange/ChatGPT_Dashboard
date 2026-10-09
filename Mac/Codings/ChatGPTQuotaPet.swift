@@ -16,6 +16,11 @@ struct QuotaSnapshot {
     let secondary: QuotaWindow
     let sampledAt: Date
     let sourceName: String
+
+    static func newest(_ live: QuotaSnapshot?, _ cached: QuotaSnapshot?) -> QuotaSnapshot? {
+        if let live, let cached { return cached.sampledAt > live.sampledAt ? cached : live }
+        return live ?? cached
+    }
 }
 
 enum QuotaParser {
@@ -41,6 +46,13 @@ enum QuotaParser {
 
     static func dictionary(_ value: Any?) -> [String: Any]? {
         value as? [String: Any]
+    }
+
+    static func accountSnapshot(from response: [String: Any], sampledAt: Date) -> QuotaSnapshot? {
+        // Prefer the Codex bucket when the server returns multiple metered limits.
+        let buckets = dictionary(response["rateLimitsByLimitId"])
+        let limits = buckets?["codex"] ?? response["rateLimits"] ?? response["rate_limits"]
+        return snapshot(from: limits, sampledAt: sampledAt, sourceName: "app-server")
     }
 
     static func snapshot(from limitsValue: Any?, sampledAt: Date, sourceName: String) -> QuotaSnapshot? {
@@ -157,6 +169,7 @@ final class CodexAppServerClient {
         queue.async { [weak self] in
             guard let self else { return }
             if let pendingSince = self.pendingSince, Date().timeIntervalSince(pendingSince) > 20 {
+                self.emitError("本地额度接口响应超时")
                 self.closeOnQueue()
             }
             if self.process?.isRunning != true {
@@ -181,20 +194,32 @@ final class CodexAppServerClient {
             return URL(fileURLWithPath: explicit)
         }
 
+        // Finder-launched apps do not inherit the shell's Codex PATH alias.
+        let appRoots = ["/Applications", NSHomeDirectory() + "/Applications"]
+        let relativePaths = [
+            "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+            "Contents/Resources/codex"
+        ]
+        for root in appRoots {
+            for app in ["ChatGPT.app", "Codex.app"] {
+                for relativePath in relativePaths {
+                    let candidate = "\(root)/\(app)/\(relativePath)"
+                    if fileManager.isExecutableFile(atPath: candidate) {
+                        return URL(fileURLWithPath: candidate)
+                    }
+                }
+            }
+        }
+
         let path = ProcessInfo.processInfo.environment["PATH"] ?? ""
-        for directory in path.split(separator: ":") {
+        for directory in path.split(separator: ":").map(String.init) + ["/opt/homebrew/bin", "/usr/local/bin"] {
             let candidate = String(directory) + "/codex"
             if fileManager.isExecutableFile(atPath: candidate) {
                 return URL(fileURLWithPath: candidate)
             }
         }
 
-        let candidates = [
-            "/Applications/ChatGPT.app/Contents/Resources/codex",
-            "/Applications/Codex.app/Contents/Resources/codex",
-            NSHomeDirectory() + "/Applications/ChatGPT.app/Contents/Resources/codex"
-        ]
-        return candidates.map(URL.init(fileURLWithPath:)).first { fileManager.isExecutableFile(atPath: $0.path) }
+        return nil
     }
 
     private func startOnQueue() {
@@ -255,6 +280,7 @@ final class CodexAppServerClient {
 
         nextID = 1
         initializeID = nextID
+        pendingSince = Date()
         sendOnQueue([
             "jsonrpc": "2.0",
             "id": nextID,
@@ -295,8 +321,7 @@ final class CodexAppServerClient {
     private func handle(_ message: [String: Any]) {
         if let method = message["method"] as? String, method == "account/rateLimits/updated" {
             let params = message["params"] as? [String: Any]
-            let limits = params?["rateLimits"] ?? params?["rate_limits"]
-            if let snapshot = QuotaParser.snapshot(from: limits, sampledAt: Date(), sourceName: "app-server") {
+            if let params, let snapshot = QuotaParser.accountSnapshot(from: params, sampledAt: Date()) {
                 onSnapshot?(snapshot)
                 lastError = ""
             }
@@ -306,6 +331,7 @@ final class CodexAppServerClient {
         guard let messageID = QuotaParser.number(message["id"]).map({ Int($0) }) else { return }
         if messageID == initializeID {
             initializeID = nil
+            pendingSince = nil
             if let error = message["error"] as? [String: Any], let text = error["message"] as? String {
                 emitError(text)
                 closeOnQueue()
@@ -321,8 +347,7 @@ final class CodexAppServerClient {
         pendingReadID = nil
         pendingSince = nil
         if let result = message["result"] as? [String: Any],
-           let limits = result["rateLimits"] ?? result["rate_limits"],
-           let snapshot = QuotaParser.snapshot(from: limits, sampledAt: Date(), sourceName: "app-server") {
+           let snapshot = QuotaParser.accountSnapshot(from: result, sampledAt: Date()) {
             onSnapshot?(snapshot)
             lastError = ""
         } else if let error = message["error"] as? [String: Any], let text = error["message"] as? String {
@@ -338,9 +363,7 @@ final class CodexAppServerClient {
     }
 
     private func emitErrorIfNeeded() {
-        if lastError.isEmpty {
-            emitError("本地额度接口已退出")
-        }
+        emitError(lastError.isEmpty ? "本地额度接口已退出" : lastError)
     }
 
     private func closeOnQueue() {
@@ -441,6 +464,14 @@ final class QuotaModel: ObservableObject {
     @Published private(set) var connectionError = ""
     @Published private(set) var footer = "正在连接本地额度接口…"
 
+    var currentSnapshot: QuotaSnapshot? {
+        QuotaSnapshot.newest(snapshot, fallbackSnapshot)
+    }
+
+    var isLive: Bool {
+        currentSnapshot?.sourceName == "app-server" && connectionError.isEmpty
+    }
+
     private let client = CodexAppServerClient()
     private let codexHome: URL
     private let refreshSeconds: TimeInterval
@@ -453,11 +484,16 @@ final class QuotaModel: ObservableObject {
             Task { @MainActor in
                 self?.snapshot = snapshot
                 self?.connectionError = ""
-                self?.updateFooter(snapshot)
+                if let self, let display = self.currentSnapshot { self.updateFooter(display) }
             }
         }
         client.onError = { [weak self] message in
-            Task { @MainActor in self?.connectionError = message }
+            Task { @MainActor in
+                guard let self else { return }
+                self.connectionError = message
+                if let display = self.currentSnapshot { self.updateFooter(display) }
+                else { self.footer = QuotaFormatter.shortError(message) }
+            }
         }
     }
 
@@ -471,7 +507,7 @@ final class QuotaModel: ObservableObject {
     func refresh() {
         fallbackSnapshot = SnapshotLoader.load(root: codexHome)
         client.refresh()
-        let display = snapshot ?? fallbackSnapshot
+        let display = currentSnapshot
         if let display { updateFooter(display) } else { footer = "正在连接本地额度接口…" }
     }
 
@@ -485,10 +521,10 @@ final class QuotaModel: ObservableObject {
         let ageMinutes = max(0, Date().timeIntervalSince(value.sampledAt) / 60)
         let formatter = DateFormatter()
         formatter.dateFormat = ageMinutes >= 10 ? "MM-dd HH:mm" : "HH:mm"
-        let source = value.sourceName == "app-server" ? "实时" : "快照"
+        let source = isLive ? "实时" : "快照"
         let stale = ageMinutes >= 10 ? " · 可能过期" : ""
         let shortError = QuotaFormatter.shortError(connectionError)
-        let error = value.sourceName == "app-server" || shortError.isEmpty ? "" : " · \(shortError)"
+        let error = shortError.isEmpty ? "" : " · \(shortError)"
         footer = "\(source) \(formatter.string(from: value.sampledAt))\(stale)\(error)"
     }
 }
@@ -667,7 +703,7 @@ struct QuotaView: View {
     private let placeholder = QuotaWindow(remaining: nil, used: nil, resetAt: nil, windowMinutes: nil)
 
     private var currentSnapshot: QuotaSnapshot? {
-        model.snapshot ?? model.fallbackSnapshot
+        model.currentSnapshot
     }
 
     private var planTitle: String {
@@ -679,7 +715,7 @@ struct QuotaView: View {
     }
 
     private var statusTint: Color {
-        currentSnapshot?.sourceName == "app-server"
+        model.isLive
             ? Color(red: 0.08, green: 0.71, blue: 0.54)
             : Color(red: 0.96, green: 0.60, blue: 0.06)
     }
@@ -1002,7 +1038,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateStatusItem() {
         guard let statusView else { return }
-        let value = model.snapshot ?? model.fallbackSnapshot
+        let value = model.currentSnapshot
         if let value {
             statusView.update(primary: value.primary.remaining, secondary: value.secondary.remaining, sourceName: value.sourceName)
         } else {

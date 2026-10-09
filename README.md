@@ -21,7 +21,7 @@ macOS 详情页采用内容优先的 Liquid Glass 布局：系统弹窗提供玻
 
 ## 启动
 
-当前 macOS 安装包为 `Mac/Packages/ChatGPTQuotaPet-1.4-LiquidGlass.dmg`。打开磁盘映像后，将 `ChatGPTQuotaPet.app` 拖到 `Applications` 即可安装。
+当前 macOS 安装包为 `Mac/Packages/ChatGPTQuotaPet-1.5-LiquidGlass.dmg`。打开磁盘映像后，将 `ChatGPTQuotaPet.app` 拖到 `Applications` 即可安装。1.5 修复新版 ChatGPT 内置 Codex 路径变化导致的额度停止更新，并在实时接口断开时选用较新的会话快照、显示连接错误。
 
 双击 `Mac/Codings/Start-ChatGPTQuotaPet.command`。首次运行会编译并打开 `Mac/Packages/ChatGPTQuotaPet.app`；之后也可以直接双击 `Mac/Packages/ChatGPTQuotaPet.app`。
 
