@@ -428,14 +428,15 @@ enum QuotaFormatter {
         window: QuotaWindow,
         fallbackWindowMinutes: Double,
         displayPeriodMinutes: Double,
-        unit: String
+        unit: String,
+        now: Date = Date()
     ) -> String {
         guard let resetAt = window.resetAt, let usedValue = window.used else { return "等待数据" }
 
         let totalMinutes = max(1, window.windowMinutes ?? fallbackWindowMinutes)
         let remainingMinutes = min(
             totalMinutes,
-            max(0, (resetAt - Date().timeIntervalSince1970) / 60)
+            max(0, (resetAt - now.timeIntervalSince1970) / 60)
         )
         let elapsedMinutes = totalMinutes - remainingMinutes
         guard elapsedMinutes >= 1 else { return "等待数据" }
@@ -475,7 +476,17 @@ final class QuotaModel: ObservableObject {
     private let client = CodexAppServerClient()
     private let codexHome: URL
     private let refreshSeconds: TimeInterval
+    private let fallbackScanInterval: TimeInterval = 30
+    private let fallbackScanQueue = DispatchQueue(
+        label: "com.local.chatgpt.quotapet.snapshot-loader",
+        qos: .utility
+    )
     private var timer: Timer?
+    private var lastFallbackScanAt: Date?
+    private var fallbackScanInFlight = false
+    private var forceFallbackScanPending = false
+    private var scanGeneration = 0
+    private var isStopped = false
 
     init(refreshSeconds: TimeInterval = 1) {
         self.refreshSeconds = refreshSeconds
@@ -498,22 +509,81 @@ final class QuotaModel: ObservableObject {
     }
 
     func start() {
+        isStopped = false
+        scanGeneration &+= 1
+        fallbackScanInFlight = false
+        forceFallbackScanPending = false
+        timer?.invalidate()
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: refreshSeconds, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
+            Task { @MainActor in self?.refresh(forceFallbackScan: false) }
         }
     }
 
     func refresh() {
-        fallbackSnapshot = SnapshotLoader.load(root: codexHome)
+        refresh(forceFallbackScan: true)
+    }
+
+    private func refresh(forceFallbackScan: Bool) {
+        guard !isStopped else { return }
+        requestFallbackSnapshotScan(force: forceFallbackScan)
         client.refresh()
-        let display = currentSnapshot
-        if let display { updateFooter(display) } else { footer = "正在连接本地额度接口…" }
+        updateFooterForCurrentSnapshot()
+    }
+
+    private func requestFallbackSnapshotScan(force: Bool) {
+        guard !isStopped else { return }
+
+        if fallbackScanInFlight {
+            if force { forceFallbackScanPending = true }
+            return
+        }
+
+        let now = Date()
+        if !force,
+           let lastFallbackScanAt,
+           now.timeIntervalSince(lastFallbackScanAt) < fallbackScanInterval {
+            return
+        }
+
+        fallbackScanInFlight = true
+        lastFallbackScanAt = now
+        let generation = scanGeneration
+        let root = codexHome
+        fallbackScanQueue.async { [weak self] in
+            let loadedSnapshot = SnapshotLoader.load(root: root)
+            Task { @MainActor [weak self] in
+                guard let self,
+                      !self.isStopped,
+                      self.scanGeneration == generation else { return }
+
+                self.fallbackScanInFlight = false
+                self.fallbackSnapshot = loadedSnapshot
+                self.updateFooterForCurrentSnapshot()
+
+                if self.forceFallbackScanPending {
+                    self.forceFallbackScanPending = false
+                    self.requestFallbackSnapshotScan(force: true)
+                }
+            }
+        }
+    }
+
+    private func updateFooterForCurrentSnapshot() {
+        if let display = currentSnapshot {
+            updateFooter(display)
+        } else if connectionError.isEmpty {
+            footer = "正在连接本地额度接口…"
+        }
     }
 
     func stop() {
+        isStopped = true
+        scanGeneration &+= 1
         timer?.invalidate()
         timer = nil
+        fallbackScanInFlight = false
+        forceFallbackScanPending = false
         client.stop()
     }
 
@@ -558,24 +628,78 @@ private struct GlassIconButton: View {
     let accessibilityLabel: String
     let action: () -> Void
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @State private var cursorID = UUID()
+    @State private var cursorBounds = CGSize(width: 30, height: 30)
 
     private var button: some View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 13, weight: .semibold))
                 .frame(width: 30, height: 30)
+                .contentShape(Circle())
         }
         .accessibilityLabel(accessibilityLabel)
         .help(accessibilityLabel)
     }
 
-    var body: some View {
+    @ViewBuilder
+    private var styledButton: some View {
         if #available(macOS 26.0, *), !reduceTransparency {
             button
                 .buttonStyle(.plain)
                 .glassEffect(.regular.interactive(), in: Circle())
         } else {
             button.buttonStyle(.bordered)
+        }
+    }
+
+    var body: some View {
+        styledButton
+            .contentShape(Circle())
+            .background {
+                GeometryReader { geometry in
+                    Color.clear.preference(key: ToolbarButtonBoundsKey.self, value: geometry.size)
+                }
+                .allowsHitTesting(false)
+            }
+            .onPreferenceChange(ToolbarButtonBoundsKey.self) { cursorBounds = $0 }
+            // Track the visible button after styling, including its glass surface.
+            .onContinuousHover { phase in
+                switch phase {
+                case .active(let location):
+                    let circle = Circle().path(in: CGRect(origin: .zero, size: cursorBounds))
+                    if circle.contains(location) {
+                        ToolbarCursor.activate(for: cursorID)
+                    } else {
+                        ToolbarCursor.restore(for: cursorID)
+                    }
+                case .ended:
+                    ToolbarCursor.restore(for: cursorID)
+                }
+            }
+            .onDisappear { ToolbarCursor.restore(for: cursorID) }
+    }
+}
+
+private struct ToolbarButtonBoundsKey: PreferenceKey {
+    static var defaultValue: CGSize { .zero }
+    static func reduce(value: inout CGSize, nextValue: () -> CGSize) { value = nextValue() }
+}
+
+@MainActor
+private enum ToolbarCursor {
+    private static var owner: UUID?
+
+    static func activate(for id: UUID) {
+        owner = id
+        NSCursor.pointingHand.set()
+    }
+
+    static func restore(for id: UUID? = nil) {
+        guard let owner, id == nil || owner == id else { return }
+        self.owner = nil
+        if NSCursor.current == NSCursor.pointingHand {
+            NSCursor.arrow.set()
         }
     }
 }
@@ -629,6 +753,7 @@ private struct QuotaRow: View {
     let fallbackWindowMinutes: Double
     let ratePeriodMinutes: Double
     let rateUnit: String
+    let now: Date
 
     private var tint: Color {
         guard let remaining = window.remaining else { return Color.gray.opacity(0.55) }
@@ -646,7 +771,8 @@ private struct QuotaRow: View {
             window: window,
             fallbackWindowMinutes: fallbackWindowMinutes,
             displayPeriodMinutes: ratePeriodMinutes,
-            unit: rateUnit
+            unit: rateUnit,
+            now: now
         )
     }
 
@@ -664,7 +790,7 @@ private struct QuotaRow: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .help("按本机时区显示接口返回的重置时间")
-                Text(QuotaFormatter.reset(window.resetAt))
+                Text(QuotaFormatter.reset(window.resetAt, now: now))
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -720,20 +846,20 @@ struct QuotaView: View {
             : Color(red: 0.96, green: 0.60, blue: 0.06)
     }
 
-    private var quotaRows: some View {
+    private func quotaRows(now: Date) -> some View {
         VStack(spacing: 0) {
             quotaRow(
                 title: "5 小时窗口剩余", badge: "5h",
                 window: currentSnapshot?.primary ?? placeholder,
                 fallbackWindowMinutes: 5 * 60,
-                ratePeriodMinutes: 30, rateUnit: "30min"
+                ratePeriodMinutes: 30, rateUnit: "30min", now: now
             )
             Divider().padding(.leading, 66)
             quotaRow(
                 title: "7 天窗口剩余", badge: "7d",
                 window: currentSnapshot?.secondary ?? placeholder,
                 fallbackWindowMinutes: 7 * 24 * 60,
-                ratePeriodMinutes: 24 * 60, rateUnit: "天"
+                ratePeriodMinutes: 24 * 60, rateUnit: "天", now: now
             )
         }
     }
@@ -744,7 +870,8 @@ struct QuotaView: View {
         window: QuotaWindow,
         fallbackWindowMinutes: Double,
         ratePeriodMinutes: Double,
-        rateUnit: String
+        rateUnit: String,
+        now: Date
     ) -> some View {
         QuotaRow(
             title: title,
@@ -752,7 +879,8 @@ struct QuotaView: View {
             window: window,
             fallbackWindowMinutes: fallbackWindowMinutes,
             ratePeriodMinutes: ratePeriodMinutes,
-            rateUnit: rateUnit
+            rateUnit: rateUnit,
+            now: now
         )
     }
 
@@ -782,7 +910,10 @@ struct QuotaView: View {
                 .foregroundStyle(.secondary)
                 .padding(.bottom, 2)
 
-                quotaRows
+                // Clock changes must invalidate rows even when quota values stay the same.
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    quotaRows(now: context.date)
+                }
                 Spacer(minLength: 4)
                 Divider().padding(.bottom, 10)
                 HStack(alignment: .top, spacing: 6) {
@@ -845,6 +976,8 @@ final class QuotaStatusView: NSView {
 
     override var isFlipped: Bool { true }
 
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     override func layout() {
         super.layout()
         iconView.frame = NSRect(x: iconLeading, y: 1, width: iconSize, height: iconSize)
@@ -888,12 +1021,13 @@ final class QuotaStatusView: NSView {
     override func mouseDown(with event: NSEvent) {
         isPressed = true
         needsDisplay = true
-        onLeftClick?()
     }
 
     override func mouseUp(with event: NSEvent) {
+        let shouldOpen = isPressed && bounds.contains(convert(event.locationInWindow, from: nil))
         isPressed = false
         needsDisplay = true
+        if shouldOpen { onLeftClick?() }
     }
 
     override func rightMouseDown(with event: NSEvent) {
@@ -902,7 +1036,7 @@ final class QuotaStatusView: NSView {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let model = QuotaModel()
     private var popover: NSPopover!
     private var statusItem: NSStatusItem!
@@ -941,8 +1075,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.stop()
     }
 
+    func applicationDidBecomeActive(_ notification: Notification) {
+        if popover?.isShown == true {
+            popover.contentViewController?.view.window?.makeKey()
+        }
+    }
+
     private func buildPopover() {
         popover = NSPopover()
+        popover.delegate = self
         popover.behavior = .transient
         popover.animates = true
         popover.contentSize = NSSize(width: QuotaDesign.width, height: QuotaDesign.height)
@@ -986,7 +1127,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let mouseDownMask: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
 
         localClickMonitor = NSEvent.addLocalMonitorForEvents(matching: mouseDownMask) { [weak self] event in
-            self?.dismissPopoverForLocalClick()
+            self?.dismissPopoverForLocalClick(event)
             return event
         }
 
@@ -1008,9 +1149,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func dismissPopoverForLocalClick() {
+    private func dismissPopoverForLocalClick(_ event: NSEvent) {
         guard popover.isShown else { return }
-        let clickLocation = NSEvent.mouseLocation
+        // Use the dispatched event, which may be older than the current pointer position.
+        if let popoverWindow = popover.contentViewController?.view.window,
+           event.window === popoverWindow {
+            return
+        }
+        let clickLocation = event.window?.convertPoint(toScreen: event.locationInWindow) ?? NSEvent.mouseLocation
 
         if let popoverWindow = popover.contentViewController?.view.window,
            popoverWindow.frame.contains(clickLocation) {
@@ -1055,13 +1201,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func showPopover() {
         guard let statusView else { return }
+        if #available(macOS 14.0, *) {
+            NSApp.activate()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+        }
         if !popover.isShown {
             popover.show(relativeTo: statusView.bounds, of: statusView, preferredEdge: .minY)
         }
+        popover.contentViewController?.view.window?.makeKey()
     }
 
     @objc private func closePopover() {
         popover.performClose(nil)
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        ToolbarCursor.restore()
     }
 
     private func togglePopover() {
