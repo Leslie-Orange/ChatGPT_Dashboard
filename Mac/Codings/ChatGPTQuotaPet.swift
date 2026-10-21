@@ -591,19 +591,19 @@ final class QuotaModel: ObservableObject {
         let ageMinutes = max(0, Date().timeIntervalSince(value.sampledAt) / 60)
         let formatter = DateFormatter()
         formatter.dateFormat = ageMinutes >= 10 ? "MM-dd HH:mm" : "HH:mm"
-        let source = isLive ? "实时" : "快照"
+        let source = isLive ? "" : "快照 "
         let stale = ageMinutes >= 10 ? " · 可能过期" : ""
         let shortError = QuotaFormatter.shortError(connectionError)
         let error = shortError.isEmpty ? "" : " · \(shortError)"
-        footer = "\(source) \(formatter.string(from: value.sampledAt))\(stale)\(error)"
+        footer = "\(source)\(formatter.string(from: value.sampledAt))\(stale)\(error)"
     }
 }
 
 private enum QuotaDesign {
-    static let width: CGFloat = 400
-    static let height: CGFloat = 326
-    static let inset: CGFloat = 24
-    static let accent = Color.accentColor
+    static let width: CGFloat = 416
+    static let height: CGFloat = 400
+    static let inset: CGFloat = 20
+    static let cardRadius: CGFloat = 16
 }
 
 private struct LiquidGlassBackground: View {
@@ -721,45 +721,39 @@ private struct QuotaToolbar: View {
     }
 }
 
-private struct QuotaRing: View {
+private struct QuotaProgress: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    let label: String
     let progress: CGFloat
     let tint: Color
 
     var body: some View {
-        ZStack {
-            Circle()
-                .stroke(Color.primary.opacity(0.12), lineWidth: 5)
-            Circle()
-                .trim(from: 0, to: progress)
-                .stroke(tint, style: StrokeStyle(lineWidth: 5, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-
-            Text(label)
-                .font(.system(size: 11, weight: .semibold, design: .rounded))
-                .foregroundStyle(Color.primary.opacity(0.72))
+        GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                Capsule().fill(.primary.opacity(0.08))
+                Capsule().fill(tint)
+                    .frame(width: geometry.size.width * progress)
+            }
         }
-        .frame(width: 52, height: 52)
+        .frame(height: 4)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.35), value: progress)
         .accessibilityHidden(true)
     }
 }
 
-private struct QuotaRow: View {
+private struct QuotaCard: View {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var contrast
     let title: String
-    let badge: String
     let window: QuotaWindow
     let fallbackWindowMinutes: Double
     let ratePeriodMinutes: Double
     let rateUnit: String
+    let warningThreshold: Double
     let now: Date
 
     private var tint: Color {
-        guard let remaining = window.remaining else { return Color.gray.opacity(0.55) }
-        if remaining <= 10 { return Color(red: 0.94, green: 0.29, blue: 0.30) }
-        if remaining <= 30 { return Color(red: 0.96, green: 0.60, blue: 0.06) }
-        return QuotaDesign.accent
+        guard let remaining = window.remaining else { return .secondary }
+        return Color(nsColor: remaining < warningThreshold ? .systemOrange : .systemBlue)
     }
 
     private var progress: CGFloat {
@@ -776,48 +770,55 @@ private struct QuotaRow: View {
         )
     }
 
-    private var rowContent: some View {
-        HStack(spacing: 14) {
-            QuotaRing(label: badge, progress: progress, tint: tint)
-
-            VStack(alignment: .leading, spacing: 4) {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
                 Text(QuotaFormatter.caption(minutes: window.windowMinutes, fallback: title))
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
-                Text(QuotaFormatter.resetDate(window.resetAt))
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .help("按本机时区显示接口返回的重置时间")
-                Text(QuotaFormatter.reset(window.resetAt, now: now))
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Spacer(minLength: 6)
-
-            VStack(alignment: .trailing, spacing: 3) {
+                Spacer(minLength: 0)
                 Text(QuotaFormatter.percent(window.remaining))
                     .font(.system(size: 30, weight: .semibold, design: .rounded))
                     .monospacedDigit()
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(tint)
                     .minimumScaleFactor(0.8)
                     .lineLimit(1)
-                Text(consumptionRate)
-                    .font(.system(size: 10, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .help("按当前窗口已用额度与已过时长折算")
+                    .accessibilityLabel("剩余 \(QuotaFormatter.percent(window.remaining))")
             }
-        }
-        .padding(.vertical, 13)
-        .accessibilityElement(children: .combine)
-    }
 
-    var body: some View {
-        rowContent
+            VStack(alignment: .leading, spacing: 4) {
+                Text(QuotaFormatter.reset(window.resetAt, now: now))
+                    .monospacedDigit()
+                HStack(spacing: 8) {
+                    if let resetAt = window.resetAt, resetAt.isFinite, resetAt > 0 {
+                        Text(QuotaFormatter.resetDate(resetAt))
+                            .help("按本机时区显示接口返回的重置时间")
+                    }
+                    Spacer(minLength: 0)
+                    Text("消耗速率 \(consumptionRate)")
+                        .monospacedDigit()
+                        .help("按当前窗口已用额度与已过时长折算")
+                }
+            }
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            QuotaProgress(progress: progress, tint: tint)
+                .opacity(window.remaining == nil ? 0 : 1)
+        }
+        .padding(14)
+        .background {
+            // Content uses a quiet system surface; Liquid Glass stays on controls.
+            RoundedRectangle(cornerRadius: QuotaDesign.cardRadius, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(reduceTransparency ? 1 : 0.55))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: QuotaDesign.cardRadius, style: .continuous)
+                .strokeBorder(.primary.opacity(contrast == .increased ? 0.3 : 0.07), lineWidth: 1)
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -835,51 +836,58 @@ struct QuotaView: View {
     private var planTitle: String {
         let plan = currentSnapshot?.planType?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let plan, !plan.isEmpty {
-            return "\(plan.capitalized) 额度"
+            return "\(plan.capitalized) 订阅"
         }
-        return "订阅额度"
+        return "订阅"
+    }
+
+    private var statusLabel: String {
+        if !model.connectionError.isEmpty { return "连接失败" }
+        guard currentSnapshot != nil else { return "连接中" }
+        return model.isLive ? "实时" : "快照"
     }
 
     private var statusTint: Color {
-        model.isLive
-            ? Color(red: 0.08, green: 0.71, blue: 0.54)
-            : Color(red: 0.96, green: 0.60, blue: 0.06)
+        if !model.connectionError.isEmpty { return Color(nsColor: .systemRed) }
+        guard currentSnapshot != nil else { return .secondary }
+        return Color(nsColor: model.isLive ? .systemBlue : .systemOrange)
     }
 
-    private func quotaRows(now: Date) -> some View {
-        VStack(spacing: 0) {
-            quotaRow(
-                title: "5 小时窗口剩余", badge: "5h",
+    private func quotaCards(now: Date) -> some View {
+        VStack(spacing: 10) {
+            quotaCard(
+                title: "5 小时窗口剩余",
                 window: currentSnapshot?.primary ?? placeholder,
                 fallbackWindowMinutes: 5 * 60,
-                ratePeriodMinutes: 30, rateUnit: "30min", now: now
+                ratePeriodMinutes: 60, rateUnit: "h",
+                warningThreshold: 20, now: now
             )
-            Divider().padding(.leading, 66)
-            quotaRow(
-                title: "7 天窗口剩余", badge: "7d",
+            quotaCard(
+                title: "7 天窗口剩余",
                 window: currentSnapshot?.secondary ?? placeholder,
                 fallbackWindowMinutes: 7 * 24 * 60,
-                ratePeriodMinutes: 24 * 60, rateUnit: "天", now: now
+                ratePeriodMinutes: 24 * 60, rateUnit: "天",
+                warningThreshold: 10, now: now
             )
         }
     }
 
-    private func quotaRow(
+    private func quotaCard(
         title: String,
-        badge: String,
         window: QuotaWindow,
         fallbackWindowMinutes: Double,
         ratePeriodMinutes: Double,
         rateUnit: String,
+        warningThreshold: Double,
         now: Date
     ) -> some View {
-        QuotaRow(
+        QuotaCard(
             title: title,
-            badge: badge,
             window: window,
             fallbackWindowMinutes: fallbackWindowMinutes,
             ratePeriodMinutes: ratePeriodMinutes,
             rateUnit: rateUnit,
+            warningThreshold: warningThreshold,
             now: now
         )
     }
@@ -889,40 +897,42 @@ struct QuotaView: View {
             LiquidGlassBackground()
             VStack(alignment: .leading, spacing: 0) {
                 HStack(alignment: .center) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Codex")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(.secondary)
-                        Text(planTitle)
-                            .font(.system(size: 22, weight: .semibold))
-                    }
+                    Text(planTitle)
+                        .font(.system(size: 21, weight: .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(planTitle)
                     Spacer()
                     QuotaToolbar(refresh: refresh, dismiss: dismiss)
                 }
-                .padding(.bottom, 18)
-
-                HStack {
-                    Text("额度窗口")
-                    Spacer()
-                    Text("剩余比例")
-                }
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.secondary)
-                .padding(.bottom, 2)
+                .frame(minHeight: 44)
+                .padding(.bottom, 16)
 
                 // Clock changes must invalidate rows even when quota values stay the same.
                 TimelineView(.periodic(from: .now, by: 1)) { context in
-                    quotaRows(now: context.date)
+                    quotaCards(now: context.date)
                 }
-                Spacer(minLength: 4)
+                Spacer(minLength: 10)
                 Divider().padding(.bottom, 10)
-                HStack(alignment: .top, spacing: 6) {
-                    Circle().fill(statusTint).frame(width: 6, height: 6).padding(.top, 4)
+                HStack(alignment: .center, spacing: 10) {
                     Text(model.footer)
-                        .font(.system(size: 10, weight: .medium))
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
+                        .lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)
+                        .help(model.footer)
                     Spacer(minLength: 0)
+                    HStack(spacing: 5) {
+                        Circle().fill(statusTint).frame(width: 5, height: 5)
+                        Text(statusLabel)
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundStyle(statusTint)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(statusTint.opacity(0.1), in: Capsule())
+                    .fixedSize()
+                    .accessibilityLabel("数据状态：\(statusLabel)")
                 }
             }
             .padding(QuotaDesign.inset)
