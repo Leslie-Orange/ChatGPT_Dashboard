@@ -33,6 +33,8 @@ $script:Footer = '正在连接本地额度接口…'
 $script:PopupForm = $null
 $script:TrayIcon = $null
 $script:TrayIconImage = $null
+$script:TrayIconSize = 0
+$script:TrayIconIsLightTheme = $null
 $script:TrayMenu = $null
 $script:TrayAnchorPoint = $null
 $script:RefreshTimer = $null
@@ -896,7 +898,146 @@ function Get-TrayText {
     return "{0}`r`n5h：{1}`r`n7d：{2}" -f $planTitle, (Format-Percent $snapshot.Primary.Remaining), (Format-Percent $snapshot.Secondary.Remaining)
 }
 
+function Initialize-TrayNativeMethods {
+    $nativeTypeName = 'ChatGPTQuotaPet.NativeMethods'
+    if ($null -ne ($nativeTypeName -as [type])) {
+        return
+    }
+
+    $nativeMethods = @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace ChatGPTQuotaPet
+{
+    public static class NativeMethods
+    {
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern IntPtr FindWindow(string className, string windowName);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern uint GetDpiForWindow(IntPtr windowHandle);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern int GetSystemMetricsForDpi(int index, uint dpi);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern int GetSystemMetrics(int index);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern IntPtr MonitorFromWindow(IntPtr windowHandle, uint flags);
+
+        [DllImport("shcore.dll", SetLastError = true)]
+        public static extern int GetDpiForMonitor(IntPtr monitorHandle, int dpiType, out uint dpiX, out uint dpiY);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool DestroyIcon(IntPtr iconHandle);
+    }
+}
+'@
+
+    Add-Type -TypeDefinition $nativeMethods -Language CSharp -ErrorAction Stop
+}
+
+function Get-SystemUsesLightTheme {
+    $personalizePath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+    try {
+        $themeSettings = Get-ItemProperty -LiteralPath $personalizePath -Name 'SystemUsesLightTheme' -ErrorAction Stop
+        return ([int]$themeSettings.SystemUsesLightTheme -eq 1)
+    } catch {
+        # A missing setting uses the dark-taskbar foreground as a safe default.
+        return $false
+    }
+}
+
+function Get-TraySmallIconSize {
+    Initialize-TrayNativeMethods
+
+    $dpi = [uint32]96
+    $trayWindow = [ChatGPTQuotaPet.NativeMethods]::FindWindow('Shell_TrayWnd', $null)
+    if ($trayWindow -ne [IntPtr]::Zero) {
+        [uint32]$windowDpi = 0
+        try { $windowDpi = [ChatGPTQuotaPet.NativeMethods]::GetDpiForWindow($trayWindow) } catch {}
+        if ($windowDpi -gt 0) {
+            $dpi = [uint32]$windowDpi
+        } else {
+            try {
+                $monitor = [ChatGPTQuotaPet.NativeMethods]::MonitorFromWindow($trayWindow, [uint32]2)
+                if ($monitor -ne [IntPtr]::Zero) {
+                    [uint32]$monitorDpiX = 0
+                    [uint32]$monitorDpiY = 0
+                    $result = [ChatGPTQuotaPet.NativeMethods]::GetDpiForMonitor($monitor, 0, [ref]$monitorDpiX, [ref]$monitorDpiY)
+                    if ($result -eq 0 -and $monitorDpiX -gt 0) {
+                        $dpi = [uint32]$monitorDpiX
+                    }
+                }
+            } catch {
+                # Use the process-visible system metrics below when DPI APIs are unavailable.
+            }
+        }
+    }
+
+    $width = 0
+    $height = 0
+    try { $width = [ChatGPTQuotaPet.NativeMethods]::GetSystemMetricsForDpi(49, $dpi) } catch {}
+    try { $height = [ChatGPTQuotaPet.NativeMethods]::GetSystemMetricsForDpi(50, $dpi) } catch {}
+    if ($width -le 0) {
+        try { $width = [ChatGPTQuotaPet.NativeMethods]::GetSystemMetrics(49) } catch {}
+    }
+    if ($height -le 0) {
+        try { $height = [ChatGPTQuotaPet.NativeMethods]::GetSystemMetrics(50) } catch {}
+    }
+
+    $size = [Math]::Max($width, $height)
+    if ($size -le 0) {
+        $size = [int][Math]::Round(16.0 * $dpi / 96.0, 0, [MidpointRounding]::AwayFromZero)
+    }
+    return [int][Math]::Max(16, [Math]::Min(64, $size))
+}
+
+function New-TrayIconBitmap {
+    param(
+        [ValidateRange(16, 64)][int]$Size = 16,
+        [bool]$IsLightTheme = $false
+    )
+
+    $bitmap = [Drawing.Bitmap]::new($Size, $Size, [Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $graphics = [Drawing.Graphics]::FromImage($bitmap)
+    $pen = $null
+    try {
+        $graphics.Clear([Drawing.Color]::Transparent)
+        $graphics.SmoothingMode = [Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $graphics.PixelOffsetMode = [Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+        $graphics.CompositingQuality = [Drawing.Drawing2D.CompositingQuality]::HighQuality
+        $scale = [single]($Size / 16.0)
+        $graphics.ScaleTransform($scale, $scale)
+
+        $foreground = if ($IsLightTheme) {
+            [Drawing.Color]::FromArgb(255, 39, 52, 73) # #273449
+        } else {
+            [Drawing.Color]::FromArgb(255, 245, 247, 250) # #F5F7FA
+        }
+        $pen = New-Object Drawing.Pen($foreground, 1.7)
+        $pen.StartCap = [Drawing.Drawing2D.LineCap]::Round
+        $pen.EndCap = [Drawing.Drawing2D.LineCap]::Round
+        $pen.LineJoin = [Drawing.Drawing2D.LineJoin]::Round
+        $graphics.DrawArc($pen, [Drawing.RectangleF]::new(1.75, 1.75, 12.5, 12.5), 135, 270)
+        $graphics.DrawArc($pen, [Drawing.RectangleF]::new(5, 5, 6, 6), 135, 270)
+        return $bitmap
+    } catch {
+        $bitmap.Dispose()
+        throw
+    } finally {
+        if ($null -ne $pen) { $pen.Dispose() }
+        $graphics.Dispose()
+    }
+}
+
 function Update-Ui {
+    if ($null -ne $script:TrayIcon) {
+        try { Update-TrayIcon } catch {}
+    }
     if ($null -ne $script:TrayIcon) {
         try { $script:TrayIcon.Text = Get-TrayText } catch {}
     }
@@ -1320,37 +1461,55 @@ function Toggle-Popup {
 }
 
 function New-NotifyIconImage {
-    param([AllowNull()][string]$IconPath)
+    param(
+        [AllowNull()][string]$IconPath,
+        [ValidateRange(16, 64)][int]$Size = 16,
+        [bool]$IsLightTheme = $false
+    )
 
-    $target = [Drawing.Bitmap]::new(32, 32)
-    $graphics = [Drawing.Graphics]::FromImage($target)
-    $graphics.Clear([Drawing.Color]::Transparent)
-    $source = $null
+    # IconPath remains optional for callers that used the previous signature;
+    # the tray identity is now always drawn to match Windows taskbar styling.
+    $target = New-TrayIconBitmap -Size $Size -IsLightTheme $IsLightTheme
+    $hIcon = [IntPtr]::Zero
     try {
-        if (-not [string]::IsNullOrWhiteSpace($IconPath) -and (Test-Path -LiteralPath $IconPath -PathType Leaf)) {
-            $source = [Drawing.Image]::FromFile($IconPath)
-            $graphics.DrawImage($source, [Drawing.Rectangle]::new(0, 0, 32, 32))
-        } else {
-            $brush = New-Object Drawing.SolidBrush([Drawing.Color]::FromArgb(255, 64, 145, 255))
-            $graphics.FillEllipse($brush, [Drawing.Rectangle]::new(2, 2, 28, 28))
-            $brush.Dispose()
-            $pen = New-Object Drawing.Pen([Drawing.Color]::White, 2)
-            $graphics.DrawArc($pen, [Drawing.Rectangle]::new(8, 8, 16, 16), 205, 130)
-            $graphics.DrawLine($pen, 16, 17, 20, 13)
-            $pen.Dispose()
-        }
-
+        Initialize-TrayNativeMethods
         $hIcon = $target.GetHicon()
         $nativeIcon = [Drawing.Icon]::FromHandle($hIcon)
-        $result = [Drawing.Icon]$nativeIcon.Clone()
-        $nativeIcon.Dispose()
-        return $result
+        return [Drawing.Icon]$nativeIcon.Clone()
     } finally {
-        if ($null -ne $source) {
-            $source.Dispose()
+        if ($hIcon -ne [IntPtr]::Zero) {
+            [void][ChatGPTQuotaPet.NativeMethods]::DestroyIcon($hIcon)
         }
-        $graphics.Dispose()
         $target.Dispose()
+    }
+}
+
+function Update-TrayIcon {
+    if ($null -eq $script:TrayIcon) {
+        return
+    }
+
+    $isLightTheme = Get-SystemUsesLightTheme
+    $size = Get-TraySmallIconSize
+    if ($null -ne $script:TrayIconImage -and
+        $script:TrayIconSize -eq $size -and
+        $script:TrayIconIsLightTheme -eq $isLightTheme) {
+        return
+    }
+
+    $nextIcon = New-NotifyIconImage -Size $size -IsLightTheme $isLightTheme
+    $previousIcon = $script:TrayIconImage
+    try {
+        $script:TrayIcon.Icon = $nextIcon
+        $script:TrayIconImage = $nextIcon
+        $script:TrayIconSize = $size
+        $script:TrayIconIsLightTheme = $isLightTheme
+    } catch {
+        $nextIcon.Dispose()
+        throw
+    }
+    if ($null -ne $previousIcon) {
+        try { $previousIcon.Dispose() } catch {}
     }
 }
 
@@ -1447,15 +1606,8 @@ function Initialize-Ui {
 }
 
 function Initialize-Tray {
-    $iconPath = @(
-        (Join-Path $PSScriptRoot 'AppIcon.png'),
-        (Join-Path $PSScriptRoot '..\macOS\AppIcon.png')
-    ) |
-        Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
-        Select-Object -First 1
-    $script:TrayIconImage = New-NotifyIconImage -IconPath $iconPath
     $script:TrayIcon = New-Object Windows.Forms.NotifyIcon
-    $script:TrayIcon.Icon = $script:TrayIconImage
+    Update-TrayIcon
     $script:TrayIcon.Visible = $true
     $script:TrayIcon.Text = Get-TrayText
     Update-TrayAnchorPoint
@@ -1509,6 +1661,8 @@ function Stop-Application {
         try { $script:TrayIconImage.Dispose() } catch {}
         $script:TrayIconImage = $null
     }
+    $script:TrayIconSize = 0
+    $script:TrayIconIsLightTheme = $null
     $script:TrayAnchorPoint = $null
     try { [Windows.Forms.Application]::ExitThread() } catch {}
 }
