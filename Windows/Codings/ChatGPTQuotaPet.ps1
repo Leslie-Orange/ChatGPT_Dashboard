@@ -306,12 +306,16 @@ function Format-Caption {
 }
 
 function Format-Reset {
-    param([AllowNull()][object]$Timestamp)
+    param(
+        [AllowNull()][object]$Timestamp,
+        [DateTimeOffset]$Now = [DateTimeOffset]::UtcNow
+    )
 
     if ($null -eq $Timestamp) {
         return '重置时间未知'
     }
-    $seconds = [double]$Timestamp - (Get-UnixSeconds)
+    $nowUnixSeconds = $Now.ToUnixTimeMilliseconds() / 1000.0
+    $seconds = [double]$Timestamp - $nowUnixSeconds
     if ($seconds -le 0) {
         return '窗口已到点，等待刷新'
     }
@@ -319,8 +323,8 @@ function Format-Reset {
     if ($minutes -lt 60) {
         return ('约 {0} 分钟后重置' -f $minutes)
     }
-    $days = [int]($minutes / 1440)
-    $hours = [int](($minutes % 1440) / 60)
+    $days = [int][Math]::Floor($minutes / 1440.0)
+    $hours = [int][Math]::Floor(($minutes % 1440) / 60.0)
     $rest = $minutes % 60
     if ($days -gt 0) {
         return ('约 {0} 天 {1} 小时后重置' -f $days, $hours)
@@ -1714,6 +1718,7 @@ function Invoke-UiSelfTest {
 
 function Invoke-SelfTest {
     $now = [DateTimeOffset]::Now
+    $resetNow = [DateTimeOffset]::Parse('2026-10-21T00:00:00Z')
     $limits = [pscustomobject]@{
         plan_type = 'plus'
         primary = [pscustomobject]@{
@@ -1731,6 +1736,26 @@ function Invoke-SelfTest {
     if ($null -eq $snapshot) { throw '无法建立测试快照' }
     if ([Math]::Abs($snapshot.Primary.Remaining - 76) -gt 0.001) { throw '5 小时剩余比例解析失败' }
     if ([Math]::Abs($snapshot.Secondary.Remaining - 24) -gt 0.001) { throw '7 天剩余比例解析失败' }
+    $resetCases = @(
+        [pscustomobject]@{ Name = '小时进位前'; SecondsFromNow = 90 * 60; Expected = '约 1 小时 30 分钟后重置' }
+        [pscustomobject]@{ Name = '天数进位前'; SecondsFromNow = 23 * 60 * 60 + 40 * 60; Expected = '约 23 小时 40 分钟后重置' }
+        [pscustomobject]@{ Name = '60 分钟以下'; SecondsFromNow = 59 * 60; Expected = '约 59 分钟后重置' }
+        [pscustomobject]@{ Name = '60 分钟边界'; SecondsFromNow = 60 * 60; Expected = '约 1 小时 0 分钟后重置' }
+        [pscustomobject]@{ Name = '24 小时以下'; SecondsFromNow = 23 * 60 * 60 + 59 * 60; Expected = '约 23 小时 59 分钟后重置' }
+        [pscustomobject]@{ Name = '24 小时边界'; SecondsFromNow = 24 * 60 * 60; Expected = '约 1 天 0 小时后重置' }
+        [pscustomobject]@{ Name = '剩余不足 1 分钟'; SecondsFromNow = 30; Expected = '约 1 分钟后重置' }
+        [pscustomobject]@{ Name = '已过期'; SecondsFromNow = -1; Expected = '窗口已到点，等待刷新' }
+    )
+    foreach ($resetCase in $resetCases) {
+        $resetTimestamp = $resetNow.AddSeconds([double]$resetCase.SecondsFromNow).ToUnixTimeMilliseconds() / 1000.0
+        $actualReset = Format-Reset -Timestamp $resetTimestamp -Now $resetNow
+        if ($actualReset -ne $resetCase.Expected) {
+            throw ('重置倒计时自检失败（{0}）：预期“{1}”，实际“{2}”' -f $resetCase.Name, $resetCase.Expected, $actualReset)
+        }
+    }
+    if ((Format-Reset -Timestamp $null -Now $resetNow) -ne '重置时间未知') {
+        throw '重置倒计时 null 自检失败'
+    }
     if ((Format-Caption -Minutes 10080 -Fallback 'fallback') -ne '7 天窗口剩余') { throw '窗口标题格式化失败' }
     if ((Format-ShortError -ErrorMessage 'codex executable not found') -ne '未找到 codex') { throw '错误信息格式化失败' }
     $ringArc = Get-QuotaRingArc -Remaining 76
