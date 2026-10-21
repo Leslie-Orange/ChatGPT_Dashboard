@@ -5,7 +5,11 @@ param(
     [switch]$Probe,
     [switch]$SelfTest,
     [switch]$UiSelfTest,
-    [switch]$OpenDashboard
+    [switch]$OpenDashboard,
+    [string]$UiPreviewPath,
+    [ValidateSet('system', 'light', 'dark')][string]$UiPreviewTheme = 'system',
+    [ValidateRange(0.25, 3.0)][double]$UiPreviewScale = 1.0,
+    [ValidateSet('healthy', 'low', 'empty', 'long-reset', 'snapshot', 'snapshot-error')][string]$UiPreviewState = 'healthy'
 )
 
 Set-StrictMode -Version 2.0
@@ -39,6 +43,10 @@ $script:TrayMenu = $null
 $script:TrayAnchorPoint = $null
 $script:RefreshTimer = $null
 $script:AllowFormClose = $false
+$script:PopupScale = 1.0
+$script:PopupScaleOverride = if ([string]::IsNullOrWhiteSpace($UiPreviewPath)) { 0.0 } else { $UiPreviewScale }
+$script:UiThemeOverride = $UiPreviewTheme
+$script:PopupHoverButton = ''
 $script:SelfTestExitCode = 0
 $script:ProbeExitCode = 1
 $script:UiSelfTestExitCode = 1
@@ -916,6 +924,14 @@ namespace ChatGPTQuotaPet
 {
     public static class NativeMethods
     {
+        [StructLayout(LayoutKind.Sequential)]
+        public struct POINT
+        {
+            public int X;
+            public int Y;
+            public POINT(int x, int y) { X = x; Y = y; }
+        }
+
         [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         public static extern IntPtr FindWindow(string className, string windowName);
 
@@ -930,6 +946,9 @@ namespace ChatGPTQuotaPet
 
         [DllImport("user32.dll", SetLastError = true)]
         public static extern IntPtr MonitorFromWindow(IntPtr windowHandle, uint flags);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern IntPtr MonitorFromPoint(POINT point, uint flags);
 
         [DllImport("shcore.dll", SetLastError = true)]
         public static extern int GetDpiForMonitor(IntPtr monitorHandle, int dpiType, out uint dpiX, out uint dpiY);
@@ -952,6 +971,19 @@ function Get-SystemUsesLightTheme {
     } catch {
         # A missing setting uses the dark-taskbar foreground as a safe default.
         return $false
+    }
+}
+
+function Get-PopupUsesLightTheme {
+    if ($script:UiThemeOverride -eq 'light') { return $true }
+    if ($script:UiThemeOverride -eq 'dark') { return $false }
+
+    $personalizePath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+    try {
+        $themeSettings = Get-ItemProperty -LiteralPath $personalizePath -Name 'AppsUseLightTheme' -ErrorAction Stop
+        return ([int]$themeSettings.AppsUseLightTheme -eq 1)
+    } catch {
+        return Get-SystemUsesLightTheme
     }
 }
 
@@ -1091,19 +1123,183 @@ function Fill-RoundedRectangle {
     $path.Dispose()
 }
 
-function Get-QuotaTint {
-    param([AllowNull()][object]$Remaining)
+function Get-PopupLayout {
+    return [pscustomobject]@{
+        Width = 432
+        Height = 360
+        CornerRadius = 20
+        Title = [Drawing.Rectangle]::new(24, 24, 286, 32)
+        RefreshButton = [Drawing.Rectangle]::new(334, 20, 36, 36)
+        CloseButton = [Drawing.Rectangle]::new(372, 20, 36, 36)
+        PrimaryCard = [Drawing.Rectangle]::new(20, 82, 392, 108)
+        SecondaryCard = [Drawing.Rectangle]::new(20, 198, 392, 108)
+        Footer = [Drawing.Rectangle]::new(24, 326, 282, 20)
+        StatusBadge = [Drawing.Rectangle]::new(316, 322, 92, 26)
+    }
+}
 
-    if ($null -eq $Remaining) {
-        return [Drawing.Color]::FromArgb(150, 132, 138, 150)
+function Get-PopupPalette {
+    if (Get-PopupUsesLightTheme) {
+        return [pscustomobject]@{
+            Background = [Drawing.Color]::FromArgb(255, 243, 243, 243)
+            Surface = [Drawing.Color]::FromArgb(255, 255, 255, 255)
+            SurfaceHover = [Drawing.Color]::FromArgb(255, 232, 232, 232)
+            Outline = [Drawing.Color]::FromArgb(255, 225, 225, 225)
+            Primary = [Drawing.Color]::FromArgb(255, 32, 32, 32)
+            Secondary = [Drawing.Color]::FromArgb(255, 91, 95, 101)
+            Muted = [Drawing.Color]::FromArgb(255, 112, 116, 122)
+            Accent = [Drawing.Color]::FromArgb(255, 0, 103, 192)
+            Track = [Drawing.Color]::FromArgb(255, 230, 230, 230)
+            Positive = [Drawing.Color]::FromArgb(255, 16, 124, 65)
+            Warning = [Drawing.Color]::FromArgb(255, 190, 112, 0)
+            Critical = [Drawing.Color]::FromArgb(255, 196, 43, 28)
+        }
     }
-    if ([double]$Remaining -le 10) {
-        return [Drawing.Color]::FromArgb(255, 240, 74, 77)
+
+    return [pscustomobject]@{
+        Background = [Drawing.Color]::FromArgb(255, 32, 32, 32)
+        Surface = [Drawing.Color]::FromArgb(255, 43, 43, 43)
+        SurfaceHover = [Drawing.Color]::FromArgb(255, 58, 58, 58)
+        Outline = [Drawing.Color]::FromArgb(255, 65, 65, 65)
+        Primary = [Drawing.Color]::FromArgb(255, 245, 245, 245)
+        Secondary = [Drawing.Color]::FromArgb(255, 193, 193, 193)
+        Muted = [Drawing.Color]::FromArgb(255, 161, 161, 161)
+        Accent = [Drawing.Color]::FromArgb(255, 96, 205, 255)
+        Track = [Drawing.Color]::FromArgb(255, 70, 70, 70)
+        Positive = [Drawing.Color]::FromArgb(255, 108, 203, 95)
+        Warning = [Drawing.Color]::FromArgb(255, 252, 225, 0)
+        Critical = [Drawing.Color]::FromArgb(255, 255, 153, 164)
     }
-    if ([double]$Remaining -le 30) {
-        return [Drawing.Color]::FromArgb(255, 245, 153, 15)
+}
+
+function Get-PopupButtonAtPoint {
+    param(
+        [Parameter(Mandatory)][Drawing.Point]$Point,
+        [ValidateRange(0.25, 3.0)][double]$Scale = $script:PopupScale
+    )
+
+    if ($Scale -le 0) { $Scale = 1.0 }
+    $logicalPoint = [Drawing.Point]::new(
+        [int][Math]::Floor($Point.X / $Scale),
+        [int][Math]::Floor($Point.Y / $Scale)
+    )
+    $layout = Get-PopupLayout
+    if ($layout.RefreshButton.Contains($logicalPoint)) { return 'Refresh' }
+    if ($layout.CloseButton.Contains($logicalPoint)) { return 'Close' }
+    return ''
+}
+
+function Get-PopupScaleForPoint {
+    param([Parameter(Mandatory)][Drawing.Point]$Point)
+
+    $dpi = 96.0
+    $dpiFound = $false
+    try {
+        Initialize-TrayNativeMethods
+        $nativePoint = [ChatGPTQuotaPet.NativeMethods+POINT]::new($Point.X, $Point.Y)
+        $monitor = [ChatGPTQuotaPet.NativeMethods]::MonitorFromPoint($nativePoint, [uint32]2)
+        if ($monitor -ne [IntPtr]::Zero) {
+            [uint32]$dpiX = 0
+            [uint32]$dpiY = 0
+            $result = [ChatGPTQuotaPet.NativeMethods]::GetDpiForMonitor($monitor, 0, [ref]$dpiX, [ref]$dpiY)
+            if ($result -eq 0 -and $dpiX -gt 0) {
+                $dpi = [double]$dpiX
+                $dpiFound = $true
+            }
+        }
+    } catch {
+        $dpiFound = $false
     }
-    return [Drawing.Color]::FromArgb(255, 20, 181, 138)
+    if (-not $dpiFound) {
+        try {
+            Initialize-TrayNativeMethods
+            $trayWindow = [ChatGPTQuotaPet.NativeMethods]::FindWindow('Shell_TrayWnd', $null)
+            if ($trayWindow -ne [IntPtr]::Zero) {
+                $windowDpi = [ChatGPTQuotaPet.NativeMethods]::GetDpiForWindow($trayWindow)
+                if ($windowDpi -gt 0) { $dpi = [double]$windowDpi }
+            }
+        } catch {
+            $dpi = 96.0
+        }
+    }
+
+    return [double][Math]::Max(0.25, [Math]::Min(3.0, $dpi / 96.0))
+}
+
+function Get-FittedPopupScale {
+    param(
+        [Parameter(Mandatory)][Drawing.Rectangle]$WorkingArea,
+        [ValidateRange(0.25, 3.0)][double]$DesiredScale
+    )
+
+    $layout = Get-PopupLayout
+    $availableWidth = [Math]::Max(1, $WorkingArea.Width - 16)
+    $availableHeight = [Math]::Max(1, $WorkingArea.Height - 16)
+    $widthScale = $availableWidth / [double]$layout.Width
+    $heightScale = $availableHeight / [double]$layout.Height
+    $fitScale = [Math]::Min($widthScale, $heightScale)
+    if ($fitScale -gt 0.25) { $fitScale = [Math]::Max(0.25, $fitScale - 0.001) }
+    return [double][Math]::Max(0.25, [Math]::Min($DesiredScale, $fitScale))
+}
+
+function Set-PopupScale {
+    param(
+        [Parameter(Mandatory)][Windows.Forms.Form]$Form,
+        [ValidateRange(0.25, 3.0)][double]$Scale
+    )
+
+    $layout = Get-PopupLayout
+    $script:PopupScale = $Scale
+    $width = [int][Math]::Ceiling($layout.Width * $Scale)
+    $height = [int][Math]::Ceiling($layout.Height * $Scale)
+    $Form.ClientSize = [Drawing.Size]::new($width, $height)
+    $regionRectangle = [Drawing.Rectangle]::new(0, 0, [Math]::Max(1, $width - 1), [Math]::Max(1, $height - 1))
+    $regionPath = New-RoundedPath -Rectangle $regionRectangle -Radius ([int][Math]::Round($layout.CornerRadius * $Scale))
+    $previousRegion = $Form.Region
+    $Form.Region = New-Object Drawing.Region($regionPath)
+    $regionPath.Dispose()
+    if ($null -ne $previousRegion) { $previousRegion.Dispose() }
+    $Form.Invalidate()
+}
+
+function Get-QuotaTint {
+    param(
+        [AllowNull()][object]$Remaining,
+        [Parameter(Mandatory)][object]$Palette
+    )
+
+    if ($null -eq $Remaining) { return $Palette.Muted }
+    if ([double]$Remaining -le 10) { return $Palette.Critical }
+    if ([double]$Remaining -le 30) { return $Palette.Warning }
+    return $Palette.Positive
+}
+
+function Draw-PopupText {
+    param(
+        [Parameter(Mandatory)][Drawing.Graphics]$Graphics,
+        [AllowNull()][string]$Text,
+        [Parameter(Mandatory)][Drawing.RectangleF]$Rectangle,
+        [Parameter(Mandatory)][double]$Size,
+        [Parameter(Mandatory)][Drawing.FontStyle]$Style,
+        [Parameter(Mandatory)][Drawing.Color]$Color,
+        [Drawing.StringAlignment]$Alignment = [Drawing.StringAlignment]::Near,
+        [Drawing.StringAlignment]$LineAlignment = [Drawing.StringAlignment]::Near,
+        [string]$Family = 'Microsoft YaHei UI'
+    )
+
+    $font = New-Object Drawing.Font($Family, [single]($Size * 96.0 / 72.0), $Style, [Drawing.GraphicsUnit]::Pixel)
+    $brush = New-Object Drawing.SolidBrush($Color)
+    $format = New-Object Drawing.StringFormat
+    $format.Alignment = $Alignment
+    $format.LineAlignment = $LineAlignment
+    $format.Trimming = [Drawing.StringTrimming]::EllipsisCharacter
+    try {
+        $Graphics.DrawString([string]$Text, $font, $brush, $Rectangle, $format)
+    } finally {
+        $format.Dispose()
+        $brush.Dispose()
+        $font.Dispose()
+    }
 }
 
 function Get-QuotaRingArc {
@@ -1142,7 +1338,7 @@ function Draw-QuotaRing {
         $progressPen.Dispose()
     }
 
-    $labelFont = New-Object Drawing.Font('Microsoft YaHei UI', 10, [Drawing.FontStyle]::Bold)
+    $labelFont = New-Object Drawing.Font('Microsoft YaHei UI', [single](10.0 * 96.0 / 72.0), [Drawing.FontStyle]::Bold, [Drawing.GraphicsUnit]::Pixel)
     $labelBrush = New-Object Drawing.SolidBrush([Drawing.Color]::FromArgb(190, 45, 55, 70))
     $format = New-Object Drawing.StringFormat
     $format.Alignment = [Drawing.StringAlignment]::Center
@@ -1163,161 +1359,136 @@ function Draw-QuotaCard {
     param(
         [Parameter(Mandatory)][Drawing.Graphics]$Graphics,
         [Parameter(Mandatory)][Drawing.Rectangle]$Rectangle,
-        [Parameter(Mandatory)][string]$Title,
-        [Parameter(Mandatory)][string]$Badge,
         [Parameter(Mandatory)][object]$Window,
         [Parameter(Mandatory)][double]$FallbackWindowMinutes,
         [Parameter(Mandatory)][double]$RatePeriodMinutes,
-        [Parameter(Mandatory)][string]$RateUnit
+        [Parameter(Mandatory)][string]$RateUnit,
+        [Parameter(Mandatory)][object]$Palette
     )
 
-    $cardBrush = New-Object Drawing.SolidBrush([Drawing.Color]::FromArgb(135, 255, 255, 255))
-    Fill-RoundedRectangle -Graphics $Graphics -Rectangle $Rectangle -Brush $cardBrush -Radius 19
-    $cardBrush.Dispose()
-    $cardPen = New-Object Drawing.Pen([Drawing.Color]::FromArgb(110, 255, 255, 255), 1)
-    $cardPath = New-RoundedPath -Rectangle $Rectangle -Radius 19
-    $Graphics.DrawPath($cardPen, $cardPath)
-    $cardPath.Dispose()
-    $cardPen.Dispose()
+    $cardPath = New-RoundedPath -Rectangle $Rectangle -Radius 18
+    $cardBrush = New-Object Drawing.SolidBrush($Palette.Surface)
+    $cardPen = New-Object Drawing.Pen($Palette.Outline, 1)
+    try {
+        $Graphics.FillPath($cardBrush, $cardPath)
+        $Graphics.DrawPath($cardPen, $cardPath)
+    } finally {
+        $cardPen.Dispose()
+        $cardBrush.Dispose()
+        $cardPath.Dispose()
+    }
 
-    $tint = Get-QuotaTint -Remaining $Window.Remaining
-    $ringRect = [Drawing.Rectangle]::new($Rectangle.X + 15, $Rectangle.Y + 15, 52, 52)
-    Draw-QuotaRing -Graphics $Graphics -Rectangle $ringRect -Label $Badge -Remaining $Window.Remaining -Tint $tint
+    $tint = Get-QuotaTint -Remaining $Window.Remaining -Palette $Palette
+    $fallbackTitle = Format-Caption -Minutes $FallbackWindowMinutes -Fallback '额度窗口剩余'
+    $label = Format-Caption -Minutes $Window.WindowMinutes -Fallback $fallbackTitle
+    $reset = Format-Reset -Timestamp $Window.ResetAt
+    $rate = '消耗速率 ' + (Format-ConsumptionRate -Window $Window -FallbackWindowMinutes $FallbackWindowMinutes -DisplayPeriodMinutes $RatePeriodMinutes -Unit $RateUnit)
+    Draw-PopupText -Graphics $Graphics -Text $label -Rectangle ([Drawing.RectangleF]::new($Rectangle.X + 18, $Rectangle.Y + 15, 190, 24)) -Size 12 -Style ([Drawing.FontStyle]::Bold) -Color $Palette.Primary
+    Draw-PopupText -Graphics $Graphics -Text (Format-Percent $Window.Remaining) -Rectangle ([Drawing.RectangleF]::new($Rectangle.X + 218, $Rectangle.Y + 22, 156, 42)) -Size 28 -Style ([Drawing.FontStyle]::Bold) -Color $tint -Alignment ([Drawing.StringAlignment]::Far) -LineAlignment ([Drawing.StringAlignment]::Center) -Family 'Segoe UI'
+    Draw-PopupText -Graphics $Graphics -Text $reset -Rectangle ([Drawing.RectangleF]::new($Rectangle.X + 18, $Rectangle.Y + 46, 356, 18)) -Size 10 -Style ([Drawing.FontStyle]::Regular) -Color $Palette.Secondary
+    Draw-PopupText -Graphics $Graphics -Text $rate -Rectangle ([Drawing.RectangleF]::new($Rectangle.X + 18, $Rectangle.Y + 66, 356, 18)) -Size 9 -Style ([Drawing.FontStyle]::Regular) -Color $Palette.Secondary -Alignment ([Drawing.StringAlignment]::Far)
 
-    $titleFont = New-Object Drawing.Font('Microsoft YaHei UI', 11, [Drawing.FontStyle]::Bold)
-    $secondaryFont = New-Object Drawing.Font('Microsoft YaHei UI', 9, [Drawing.FontStyle]::Regular)
-    $percentFont = New-Object Drawing.Font('Microsoft YaHei UI', 17, [Drawing.FontStyle]::Bold)
-    $rateFont = New-Object Drawing.Font('Microsoft YaHei UI', 8, [Drawing.FontStyle]::Bold)
-    $primaryBrush = New-Object Drawing.SolidBrush([Drawing.Color]::FromArgb(220, 35, 45, 60))
-    $secondaryBrush = New-Object Drawing.SolidBrush([Drawing.Color]::FromArgb(175, 75, 85, 100))
-    $percentBrush = New-Object Drawing.SolidBrush($tint)
+    $trackRect = [Drawing.Rectangle]::new($Rectangle.X + 18, $Rectangle.Y + 88, $Rectangle.Width - 36, 4)
+    $trackPath = New-RoundedPath -Rectangle $trackRect -Radius 2
+    $trackBrush = New-Object Drawing.SolidBrush($Palette.Track)
+    try {
+        $Graphics.FillPath($trackBrush, $trackPath)
+    } finally {
+        $trackBrush.Dispose()
+        $trackPath.Dispose()
+    }
+    if ($null -ne $Window.Remaining) {
+        $progressWidth = [int][Math]::Round($trackRect.Width * [Math]::Min(100.0, [Math]::Max(0.0, [double]$Window.Remaining)) / 100.0)
+        if ($progressWidth -gt 0) {
+            $progressRect = [Drawing.Rectangle]::new($trackRect.X, $trackRect.Y, [Math]::Min($trackRect.Width, $progressWidth), $trackRect.Height)
+            $progressPath = New-RoundedPath -Rectangle $progressRect -Radius 2
+            $progressBrush = New-Object Drawing.SolidBrush($tint)
+            try {
+                $Graphics.FillPath($progressBrush, $progressPath)
+            } finally {
+                $progressBrush.Dispose()
+                $progressPath.Dispose()
+            }
+        }
+    }
+}
 
-    $textX = $Rectangle.X + 82
-    $Graphics.DrawString(
-        (Format-Caption -Minutes $Window.WindowMinutes -Fallback $Title),
-        $titleFont,
-        $primaryBrush,
-        [single]$textX,
-        [single]($Rectangle.Y + 17)
+function Get-PopupStatus {
+    param(
+        [AllowNull()][object]$Snapshot = (Get-CurrentSnapshot),
+        [Parameter(Mandatory)][object]$Palette
     )
-    $Graphics.DrawString(
-        (Format-Reset -Timestamp $Window.ResetAt),
-        $secondaryFont,
-        $secondaryBrush,
-        [single]$textX,
-        [single]($Rectangle.Y + 44)
-    )
 
-    $rightFormat = New-Object Drawing.StringFormat
-    $rightFormat.Alignment = [Drawing.StringAlignment]::Far
-    $Graphics.DrawString(
-        (Format-Percent $Window.Remaining),
-        $percentFont,
-        $percentBrush,
-        [Drawing.RectangleF]::new($Rectangle.X + 254, $Rectangle.Y + 13, 87, 31),
-        $rightFormat
-    )
-    $Graphics.DrawString(
-        (Format-ConsumptionRate -Window $Window -FallbackWindowMinutes $FallbackWindowMinutes -DisplayPeriodMinutes $RatePeriodMinutes -Unit $RateUnit),
-        $rateFont,
-        $secondaryBrush,
-        [Drawing.RectangleF]::new($Rectangle.X + 238, $Rectangle.Y + 48, 103, 20),
-        $rightFormat
-    )
+    if (-not [string]::IsNullOrWhiteSpace($script:ConnectionError)) {
+        return [pscustomobject]@{ Label = '连接失败'; Color = $Palette.Critical }
+    }
+    if ($null -eq $Snapshot) {
+        return [pscustomobject]@{ Label = '连接中'; Color = $Palette.Muted }
+    }
+    if ($Snapshot.SourceName -eq 'app-server') {
+        return [pscustomobject]@{ Label = '实时'; Color = $Palette.Positive }
+    }
+    return [pscustomobject]@{ Label = '快照'; Color = $Palette.Warning }
+}
 
-    $rightFormat.Dispose()
-    $percentBrush.Dispose()
-    $secondaryBrush.Dispose()
-    $primaryBrush.Dispose()
-    $rateFont.Dispose()
-    $percentFont.Dispose()
-    $secondaryFont.Dispose()
-    $titleFont.Dispose()
+function Get-DetailPlanTitle {
+    param([AllowNull()][object]$Snapshot)
+
+    if ($null -eq $Snapshot -or $null -eq $Snapshot.PlanType) { return '订阅' }
+    $plan = ([string]$Snapshot.PlanType).Trim()
+    if ([string]::IsNullOrWhiteSpace($plan)) { return '订阅' }
+    $title = [Globalization.CultureInfo]::InvariantCulture.TextInfo.ToTitleCase($plan.ToLowerInvariant())
+    return ($title + ' 订阅')
 }
 
 function Draw-Popup {
     param([Parameter(Mandatory)][Drawing.Graphics]$Graphics)
 
+    $layout = Get-PopupLayout
+    $palette = Get-PopupPalette
     $Graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-    $Graphics.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::ClearTypeGridFit
-    $client = $script:PopupForm.ClientSize
-    $outerRect = [Drawing.Rectangle]::new(0, 0, $client.Width - 1, $client.Height - 1)
-    $outerPath = New-RoundedPath -Rectangle $outerRect -Radius 20
-    $background = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
-        $outerRect,
-        [Drawing.Color]::FromArgb(248, 248, 252, 255),
-        [Drawing.Color]::FromArgb(244, 232, 239, 255),
-        45
-    )
-    $Graphics.FillPath($background, $outerPath)
-    $background.Dispose()
+    $Graphics.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
+    $Graphics.PixelOffsetMode = [Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+    $Graphics.Clear([Drawing.Color]::Transparent)
+    $Graphics.ScaleTransform([single]$script:PopupScale, [single]$script:PopupScale)
 
-    $glowBrush = New-Object Drawing.SolidBrush([Drawing.Color]::FromArgb(32, 80, 165, 255))
-    $Graphics.FillEllipse($glowBrush, [Drawing.Rectangle]::new(-90, -80, 220, 170))
-    $glowBrush.Dispose()
-    $purpleBrush = New-Object Drawing.SolidBrush([Drawing.Color]::FromArgb(25, 160, 125, 255))
-    $Graphics.FillEllipse($purpleBrush, [Drawing.Rectangle]::new(285, 205, 190, 150))
-    $purpleBrush.Dispose()
-
-    $borderPen = New-Object Drawing.Pen([Drawing.Color]::FromArgb(150, 255, 255, 255), 1)
-    $Graphics.DrawPath($borderPen, $outerPath)
-    $borderPen.Dispose()
-    $outerPath.Dispose()
-
-    $iconRect = [Drawing.Rectangle]::new(17, 16, 38, 38)
-    $iconBrush = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
-        $iconRect,
-        [Drawing.Color]::FromArgb(255, 64, 145, 255),
-        [Drawing.Color]::FromArgb(255, 110, 82, 235),
-        45
-    )
-    $Graphics.FillEllipse($iconBrush, $iconRect)
-    $iconBrush.Dispose()
-    $gaugePen = New-Object Drawing.Pen([Drawing.Color]::White, 2)
-    $Graphics.DrawArc($gaugePen, [Drawing.Rectangle]::new(25, 24, 22, 22), 205, 130)
-    $Graphics.DrawLine($gaugePen, 36, 35, 41, 30)
-    $gaugePen.Dispose()
-
-    $titleFont = New-Object Drawing.Font('Microsoft YaHei UI', 14, [Drawing.FontStyle]::Bold)
-    $titleBrush = New-Object Drawing.SolidBrush([Drawing.Color]::FromArgb(225, 28, 38, 52))
-    $Graphics.DrawString((Get-PlanTitle -Snapshot (Get-CurrentSnapshot)), $titleFont, $titleBrush, 67, 21)
-    $titleBrush.Dispose()
-    $titleFont.Dispose()
-
-    $buttonBrush = New-Object Drawing.SolidBrush([Drawing.Color]::FromArgb(95, 255, 255, 255))
-    $buttonPen = New-Object Drawing.Pen([Drawing.Color]::FromArgb(155, 255, 255, 255), 1)
-    $refreshRect = [Drawing.Rectangle]::new(309, 20, 30, 30)
-    $closeRect = [Drawing.Rectangle]::new(347, 20, 30, 30)
-    $Graphics.FillEllipse($buttonBrush, $refreshRect)
-    $Graphics.DrawEllipse($buttonPen, $refreshRect)
-    $Graphics.FillEllipse($buttonBrush, $closeRect)
-    $Graphics.DrawEllipse($buttonPen, $closeRect)
-    $buttonPen.Dispose()
-    $buttonBrush.Dispose()
-    $buttonFont = New-Object Drawing.Font('Segoe UI Symbol', 14, [Drawing.FontStyle]::Bold)
-    $buttonTextBrush = New-Object Drawing.SolidBrush([Drawing.Color]::FromArgb(180, 42, 52, 68))
-    $buttonFormat = New-Object Drawing.StringFormat
-    $buttonFormat.Alignment = [Drawing.StringAlignment]::Center
-    $buttonFormat.LineAlignment = [Drawing.StringAlignment]::Center
-    $refreshTextRect = [Drawing.RectangleF]::new(
-        [single]$refreshRect.X,
-        [single]$refreshRect.Y,
-        [single]$refreshRect.Width,
-        [single]$refreshRect.Height
-    )
-    $closeTextRect = [Drawing.RectangleF]::new(
-        [single]$closeRect.X,
-        [single]$closeRect.Y,
-        [single]$closeRect.Width,
-        [single]$closeRect.Height
-    )
-    $Graphics.DrawString('↻', $buttonFont, $buttonTextBrush, $refreshTextRect, $buttonFormat)
-    $Graphics.DrawString('×', $buttonFont, $buttonTextBrush, $closeTextRect, $buttonFormat)
-    $buttonFormat.Dispose()
-    $buttonTextBrush.Dispose()
-    $buttonFont.Dispose()
+    $outerRect = [Drawing.Rectangle]::new(0, 0, $layout.Width, $layout.Height)
+    $outerPath = New-RoundedPath -Rectangle $outerRect -Radius $layout.CornerRadius
+    $background = New-Object Drawing.SolidBrush($palette.Background)
+    $borderPen = New-Object Drawing.Pen($palette.Outline, 1)
+    try {
+        $Graphics.FillPath($background, $outerPath)
+        $Graphics.DrawPath($borderPen, $outerPath)
+    } finally {
+        $borderPen.Dispose()
+        $background.Dispose()
+        $outerPath.Dispose()
+    }
 
     $snapshot = Get-CurrentSnapshot
+    $planTitle = Get-DetailPlanTitle -Snapshot $snapshot
+    if ($null -ne $script:PopupForm) { $script:PopupForm.Text = $planTitle }
+    Draw-PopupText -Graphics $Graphics -Text $planTitle -Rectangle ([Drawing.RectangleF]$layout.Title) -Size 16 -Style ([Drawing.FontStyle]::Bold) -Color $palette.Primary
+
+    foreach ($button in @(
+        [pscustomobject]@{ Name = 'Refresh'; Rectangle = $layout.RefreshButton; Glyph = '↻' }
+        [pscustomobject]@{ Name = 'Close'; Rectangle = $layout.CloseButton; Glyph = '×' }
+    )) {
+        $buttonPath = New-RoundedPath -Rectangle $button.Rectangle -Radius 10
+        $buttonFillColor = if ($script:PopupHoverButton -eq $button.Name) { $palette.SurfaceHover } else { $palette.Background }
+        $buttonBrush = New-Object Drawing.SolidBrush($buttonFillColor)
+        $buttonPen = New-Object Drawing.Pen($(if ($script:PopupHoverButton -eq $button.Name) { $palette.Outline } else { $palette.Background }), 1)
+        try {
+            $Graphics.FillPath($buttonBrush, $buttonPath)
+            $Graphics.DrawPath($buttonPen, $buttonPath)
+        } finally {
+            $buttonPen.Dispose()
+            $buttonBrush.Dispose()
+            $buttonPath.Dispose()
+        }
+        Draw-PopupText -Graphics $Graphics -Text $button.Glyph -Rectangle ([Drawing.RectangleF]$button.Rectangle) -Size 16 -Style ([Drawing.FontStyle]::Regular) -Color $palette.Secondary -Alignment ([Drawing.StringAlignment]::Center) -LineAlignment ([Drawing.StringAlignment]::Center) -Family 'Segoe UI Symbol'
+    }
+
     $placeholder = [pscustomobject]@{
         Remaining = $null
         Used = $null
@@ -1326,35 +1497,26 @@ function Draw-Popup {
     }
     $primary = if ($null -ne $snapshot) { $snapshot.Primary } else { $placeholder }
     $secondary = if ($null -ne $snapshot) { $snapshot.Secondary } else { $placeholder }
-    Draw-QuotaCard -Graphics $Graphics -Rectangle ([Drawing.Rectangle]::new(14, 72, 358, 82)) -Title '5 小时窗口剩余' -Badge '5h' -Window $primary -FallbackWindowMinutes (5 * 60) -RatePeriodMinutes 30 -RateUnit '30min'
-    Draw-QuotaCard -Graphics $Graphics -Rectangle ([Drawing.Rectangle]::new(14, 164, 358, 82)) -Title '7 天窗口剩余' -Badge '7d' -Window $secondary -FallbackWindowMinutes (7 * 24 * 60) -RatePeriodMinutes (24 * 60) -RateUnit '天'
+    Draw-QuotaCard -Graphics $Graphics -Rectangle $layout.PrimaryCard -Window $primary -FallbackWindowMinutes (5 * 60) -RatePeriodMinutes 60 -RateUnit 'h' -Palette $palette
+    Draw-QuotaCard -Graphics $Graphics -Rectangle $layout.SecondaryCard -Window $secondary -FallbackWindowMinutes (7 * 24 * 60) -RatePeriodMinutes (24 * 60) -RateUnit '天' -Palette $palette
 
-    $statusColor = if ($null -ne $snapshot -and $snapshot.SourceName -eq 'app-server') {
-        [Drawing.Color]::FromArgb(255, 20, 181, 138)
-    } else {
-        [Drawing.Color]::FromArgb(255, 245, 153, 15)
+    $status = Get-PopupStatus -Snapshot $snapshot -Palette $palette
+    $statusColor = $status.Color
+
+    $separatorPen = New-Object Drawing.Pen($palette.Outline, 1)
+    try { $Graphics.DrawLine($separatorPen, 24, 316, 408, 316) } finally { $separatorPen.Dispose() }
+
+    $footerText = [string]$script:Footer
+    $shortError = Format-ShortError -ErrorMessage $script:ConnectionError
+    if (-not [string]::IsNullOrWhiteSpace($shortError) -and $footerText -notlike ('*' + $shortError + '*')) {
+        $footerText = ($footerText + ' · ' + $shortError).Trim(' ', '·')
     }
-    $statusBrush = New-Object Drawing.SolidBrush($statusColor)
-    $Graphics.FillEllipse($statusBrush, [Drawing.Rectangle]::new(20, 264, 7, 7))
-    $statusBrush.Dispose()
+    Draw-PopupText -Graphics $Graphics -Text $footerText -Rectangle ([Drawing.RectangleF]$layout.Footer) -Size 9 -Style ([Drawing.FontStyle]::Regular) -Color $palette.Secondary
 
-    $footerFont = New-Object Drawing.Font('Microsoft YaHei UI', 8, [Drawing.FontStyle]::Regular)
-    $footerBrush = New-Object Drawing.SolidBrush([Drawing.Color]::FromArgb(175, 75, 85, 100))
-    $footerFormat = New-Object Drawing.StringFormat
-    $footerFormat.Trimming = [Drawing.StringTrimming]::EllipsisCharacter
-    $Graphics.DrawString($script:Footer, $footerFont, $footerBrush, [Drawing.RectangleF]::new(34, 258, 260, 20), $footerFormat)
-    $badge = if ($null -eq $snapshot) { 'WAIT' } elseif ($snapshot.SourceName -eq 'app-server') { 'LIVE' } else { 'SNAPSHOT' }
-    $badgeFont = New-Object Drawing.Font('Microsoft YaHei UI', 7, [Drawing.FontStyle]::Bold)
-    $badgeBrush = New-Object Drawing.SolidBrush($statusColor)
-    $badgeFormat = New-Object Drawing.StringFormat
-    $badgeFormat.Alignment = [Drawing.StringAlignment]::Far
-    $Graphics.DrawString($badge, $badgeFont, $badgeBrush, [Drawing.RectangleF]::new(294, 258, 76, 20), $badgeFormat)
-    $badgeFormat.Dispose()
-    $badgeBrush.Dispose()
-    $badgeFont.Dispose()
-    $footerFormat.Dispose()
-    $footerBrush.Dispose()
-    $footerFont.Dispose()
+    $badgePath = New-RoundedPath -Rectangle $layout.StatusBadge -Radius 10
+    $badgeFill = New-Object Drawing.SolidBrush([Drawing.Color]::FromArgb(25, $statusColor))
+    try { $Graphics.FillPath($badgeFill, $badgePath) } finally { $badgeFill.Dispose(); $badgePath.Dispose() }
+    Draw-PopupText -Graphics $Graphics -Text $status.Label -Rectangle ([Drawing.RectangleF]$layout.StatusBadge) -Size 9 -Style ([Drawing.FontStyle]::Bold) -Color $statusColor -Alignment ([Drawing.StringAlignment]::Center) -LineAlignment ([Drawing.StringAlignment]::Center)
 }
 
 function Hide-Popup {
@@ -1451,6 +1613,13 @@ function Show-Popup {
 
     $anchorPoint = Get-TrayAnchorPoint
     $screen = [Windows.Forms.Screen]::FromPoint($anchorPoint)
+    $desiredScale = if ($script:PopupScaleOverride -gt 0) {
+        $script:PopupScaleOverride
+    } else {
+        Get-PopupScaleForPoint -Point $anchorPoint
+    }
+    $scale = Get-FittedPopupScale -WorkingArea $screen.WorkingArea -DesiredScale $desiredScale
+    Set-PopupScale -Form $script:PopupForm -Scale $scale
     $script:PopupForm.Location = Get-PopupLocation -AnchorPoint $anchorPoint -PopupSize $script:PopupForm.Size -Screen $screen
     $script:PopupForm.Show()
     $script:PopupForm.Activate()
@@ -1538,6 +1707,8 @@ function Set-FormDoubleBuffering {
 }
 
 function Initialize-Ui {
+    param([double]$Scale = 0.0)
+
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
     [Windows.Forms.Application]::EnableVisualStyles()
@@ -1550,39 +1721,47 @@ function Initialize-Ui {
     $form.ShowInTaskbar = $false
     $form.TopMost = $true
     $form.AutoScaleMode = [Windows.Forms.AutoScaleMode]::None
-    $form.ClientSize = [Drawing.Size]::new(386, 292)
-    $form.BackColor = [Drawing.Color]::FromArgb(244, 249, 255)
+    $layout = Get-PopupLayout
+    $form.ClientSize = [Drawing.Size]::new($layout.Width, $layout.Height)
+    $form.BackColor = (Get-PopupPalette).Background
     $form.Opacity = 0.98
     $form.KeyPreview = $true
-    $regionPath = New-RoundedPath -Rectangle ([Drawing.Rectangle]::new(0, 0, 386, 292)) -Radius 20
-    $form.Region = New-Object Drawing.Region($regionPath)
-    $regionPath.Dispose()
+    if ($Scale -le 0) {
+        $Scale = if ($script:PopupScaleOverride -gt 0) { $script:PopupScaleOverride } else { Get-PopupScaleForPoint -Point ([Windows.Forms.Cursor]::Position) }
+    }
+    Set-PopupScale -Form $form -Scale $Scale
     $form.Add_Paint({
         param($sender, $eventArgs)
         Draw-Popup -Graphics $eventArgs.Graphics
     })
     $form.Add_MouseMove({
         param($sender, $eventArgs)
-        $overButton = $eventArgs.Y -ge 20 -and $eventArgs.Y -lt 50 -and (
-            ($eventArgs.X -ge 309 -and $eventArgs.X -lt 339) -or
-            ($eventArgs.X -ge 347 -and $eventArgs.X -lt 377)
-        )
-        $sender.Cursor = if ($overButton) { [Windows.Forms.Cursors]::Hand } else { [Windows.Forms.Cursors]::Default }
+        $hitButton = Get-PopupButtonAtPoint -Point ([Drawing.Point]::new($eventArgs.X, $eventArgs.Y)) -Scale $script:PopupScale
+        $sender.Cursor = if ([string]::IsNullOrEmpty($hitButton)) { [Windows.Forms.Cursors]::Default } else { [Windows.Forms.Cursors]::Hand }
+        if ($script:PopupHoverButton -ne $hitButton) {
+            $script:PopupHoverButton = $hitButton
+            $sender.Invalidate()
+        }
     })
     $form.Add_MouseLeave({
         param($sender, $eventArgs)
         $sender.Cursor = [Windows.Forms.Cursors]::Default
+        if (-not [string]::IsNullOrEmpty($script:PopupHoverButton)) {
+            $script:PopupHoverButton = ''
+            $sender.Invalidate()
+        }
     })
     $form.Add_MouseDown({
         param($sender, $eventArgs)
         if ($eventArgs.Button -ne [Windows.Forms.MouseButtons]::Left) {
             return
         }
-        if ($eventArgs.X -ge 309 -and $eventArgs.X -lt 339 -and $eventArgs.Y -ge 20 -and $eventArgs.Y -lt 50) {
+        $hitButton = Get-PopupButtonAtPoint -Point ([Drawing.Point]::new($eventArgs.X, $eventArgs.Y)) -Scale $script:PopupScale
+        if ($hitButton -eq 'Refresh') {
             Refresh-Data
             return
         }
-        if ($eventArgs.X -ge 347 -and $eventArgs.X -lt 377 -and $eventArgs.Y -ge 20 -and $eventArgs.Y -lt 50) {
+        if ($hitButton -eq 'Close') {
             Hide-Popup
         }
     })
@@ -1671,25 +1850,222 @@ function Stop-Application {
     try { [Windows.Forms.Application]::ExitThread() } catch {}
 }
 
+function Set-UiPreviewState {
+    param([ValidateSet('healthy', 'low', 'empty', 'long-reset', 'snapshot', 'snapshot-error')][string]$State)
+
+    $script:LiveSnapshot = $null
+    $script:FallbackSnapshot = $null
+    $script:ConnectionError = ''
+    $now = [DateTimeOffset]::Now
+    if ($State -eq 'empty') {
+        $script:Footer = '正在连接本地额度接口…'
+        return
+    }
+
+    $primaryUsed = if ($State -eq 'low') { 94 } else { 24 }
+    $secondaryUsed = if ($State -eq 'low') { 88 } else { 76 }
+    $limits = [pscustomobject]@{
+        plan_type = 'plus'
+        primary = [pscustomobject]@{
+            used_percent = $primaryUsed
+            resets_at = $(if ($State -eq 'long-reset') { $now.AddHours(4).AddMinutes(59).ToUnixTimeSeconds() } else { $now.AddMinutes(47).ToUnixTimeSeconds() })
+            window_minutes = 300
+        }
+        secondary = [pscustomobject]@{
+            used_percent = $secondaryUsed
+            resets_at = $(if ($State -eq 'long-reset') { $now.AddDays(120).AddHours(23).ToUnixTimeSeconds() } else { $now.AddDays(3).AddHours(6).ToUnixTimeSeconds() })
+            window_minutes = 10080
+        }
+    }
+    $sourceName = if ($State -eq 'healthy' -or $State -eq 'low' -or $State -eq 'long-reset') { 'app-server' } else { 'preview-snapshot' }
+    $snapshot = New-QuotaSnapshot -Limits $limits -SampledAt $now -SourceName $sourceName
+    if ($sourceName -eq 'app-server') {
+        $script:LiveSnapshot = $snapshot
+    } else {
+        $script:FallbackSnapshot = $snapshot
+        if ($State -eq 'snapshot-error') { $script:ConnectionError = '本地额度接口连接超时' }
+    }
+    $script:Footer = Get-SnapshotFooter -Snapshot $snapshot
+}
+
+function Invoke-UiPreview {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [ValidateSet('healthy', 'low', 'empty', 'long-reset', 'snapshot', 'snapshot-error')][string]$State,
+        [ValidateSet('system', 'light', 'dark')][string]$Theme,
+        [ValidateRange(0.25, 3.0)][double]$Scale
+    )
+
+    if ($env:OS -ne 'Windows_NT') {
+        throw 'UI 预览只能在 Windows 上运行。'
+    }
+
+    $bitmap = $null
+    $graphics = $null
+    try {
+        $script:UiThemeOverride = $Theme
+        $script:PopupScaleOverride = $Scale
+        Initialize-Ui -Scale $Scale
+        Set-UiPreviewState -State $State
+        $bitmap = [Drawing.Bitmap]::new(
+            $script:PopupForm.ClientSize.Width,
+            $script:PopupForm.ClientSize.Height,
+            [Drawing.Imaging.PixelFormat]::Format32bppArgb
+        )
+        $graphics = [Drawing.Graphics]::FromImage($bitmap)
+        Draw-Popup -Graphics $graphics
+        $fullPath = [IO.Path]::GetFullPath($Path)
+        $directory = [IO.Path]::GetDirectoryName($fullPath)
+        if (-not [IO.Directory]::Exists($directory)) { [void][IO.Directory]::CreateDirectory($directory) }
+        $bitmap.Save($fullPath, [Drawing.Imaging.ImageFormat]::Png)
+        Write-Output ('UI preview saved: {0} ({1}, {2}, scale {3:0.##})' -f $fullPath, $Theme, $State, $Scale)
+    } finally {
+        if ($null -ne $graphics) { $graphics.Dispose() }
+        if ($null -ne $bitmap) { $bitmap.Dispose() }
+        Stop-Application
+    }
+}
+
 function Invoke-UiSelfTest {
     if ($env:OS -ne 'Windows_NT') {
         throw 'UI 自检只能在 Windows 上运行。'
     }
 
     try {
-        Initialize-Ui
+        $script:PopupScaleOverride = 1.0
+        Initialize-Ui -Scale 1.0
         Initialize-Tray
-        $renderBitmap = [Drawing.Bitmap]::new(
-            $script:PopupForm.ClientSize.Width,
-            $script:PopupForm.ClientSize.Height
-        )
-        $renderGraphics = [Drawing.Graphics]::FromImage($renderBitmap)
-        try {
-            Draw-Popup -Graphics $renderGraphics
-        } finally {
-            $renderGraphics.Dispose()
-            $renderBitmap.Dispose()
+
+        $layout = Get-PopupLayout
+        if ($layout.Width -lt 420 -or $layout.Width -gt 440 -or $layout.Height -lt 340 -or $layout.Height -gt 380) {
+            throw '详情窗口逻辑尺寸不符合紧凑布局要求'
         }
+        foreach ($rectangle in @($layout.RefreshButton, $layout.CloseButton, $layout.PrimaryCard, $layout.SecondaryCard, $layout.StatusBadge)) {
+            if ($rectangle.X -lt 0 -or $rectangle.Y -lt 0 -or $rectangle.Right -gt $layout.Width -or $rectangle.Bottom -gt $layout.Height) {
+                throw '详情窗口布局元素超出面板边界'
+            }
+        }
+        if ($layout.PrimaryCard.Bottom -ge $layout.SecondaryCard.Y -or $layout.SecondaryCard.Bottom -ge $layout.Footer.Y) {
+            throw '额度卡片与页脚发生重叠'
+        }
+
+        $scaleTestTheme = $script:UiThemeOverride
+        $script:UiThemeOverride = 'light'
+        Set-UiPreviewState -State 'healthy'
+        $scaleTestPalette = Get-PopupPalette
+        foreach ($scale in @(0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0)) {
+            Set-PopupScale -Form $script:PopupForm -Scale $scale
+            $expectedSize = [Drawing.Size]::new(
+                [int][Math]::Ceiling($layout.Width * $scale),
+                [int][Math]::Ceiling($layout.Height * $scale)
+            )
+            if ($script:PopupForm.ClientSize -ne $expectedSize) {
+                throw ('DPI 缩放后的窗体尺寸不一致（{0}x）' -f $scale)
+            }
+            $scaleBitmap = [Drawing.Bitmap]::new(
+                $expectedSize.Width,
+                $expectedSize.Height,
+                [Drawing.Imaging.PixelFormat]::Format32bppArgb
+            )
+            $scaleGraphics = [Drawing.Graphics]::FromImage($scaleBitmap)
+            try {
+                Draw-Popup -Graphics $scaleGraphics
+                $headerPixel = $scaleBitmap.GetPixel([int][Math]::Floor(320 * $scale), [int][Math]::Floor(72 * $scale))
+                $cardPixel = $scaleBitmap.GetPixel([int][Math]::Floor(216 * $scale), [int][Math]::Floor(181 * $scale))
+                if ($headerPixel.ToArgb() -ne $scaleTestPalette.Background.ToArgb() -or
+                    $cardPixel.ToArgb() -ne $scaleTestPalette.Surface.ToArgb()) {
+                    throw ('DPI 缩放绘制未覆盖对应布局坐标（{0}x）' -f $scale)
+                }
+            } finally {
+                $scaleGraphics.Dispose()
+                $scaleBitmap.Dispose()
+            }
+            foreach ($button in @(
+                [pscustomobject]@{ Name = 'Refresh'; Rectangle = $layout.RefreshButton }
+                [pscustomobject]@{ Name = 'Close'; Rectangle = $layout.CloseButton }
+            )) {
+                $center = [Drawing.Point]::new(
+                    [int][Math]::Floor(($button.Rectangle.X + ($button.Rectangle.Width / 2.0)) * $scale),
+                    [int][Math]::Floor(($button.Rectangle.Y + ($button.Rectangle.Height / 2.0)) * $scale)
+                )
+                if ((Get-PopupButtonAtPoint -Point $center -Scale $scale) -ne $button.Name) {
+                    throw ('按钮绘制与点击坐标不一致（{0}，{1}x）' -f $button.Name, $scale)
+                }
+                $rightEdgePoint = [Drawing.Point]::new(
+                    [int][Math]::Ceiling($button.Rectangle.Right * $scale),
+                    $center.Y
+                )
+                if ((Get-PopupButtonAtPoint -Point $rightEdgePoint -Scale $scale) -eq $button.Name) {
+                    throw ('按钮命中范围超过绘制边界（{0}，{1}x）' -f $button.Name, $scale)
+                }
+            }
+            if ($scale -ge 0.5) {
+                $gapPoint = [Drawing.Point]::new([int][Math]::Floor(371 * $scale), [int][Math]::Floor(38 * $scale))
+                if (-not [string]::IsNullOrEmpty((Get-PopupButtonAtPoint -Point $gapPoint -Scale $scale))) {
+                    throw ('刷新与关闭按钮之间的空隙不可点击（{0}x）' -f $scale)
+                }
+            }
+        }
+        $script:UiThemeOverride = $scaleTestTheme
+        Set-PopupScale -Form $script:PopupForm -Scale 1.0
+
+        foreach ($workingArea in @(
+            [Drawing.Rectangle]::new(0, 0, 1920, 1040)
+            [Drawing.Rectangle]::new(0, 0, 800, 560)
+            [Drawing.Rectangle]::new(0, 0, 640, 344)
+        )) {
+            $fittedScale = Get-FittedPopupScale -WorkingArea $workingArea -DesiredScale 3.0
+            $fittedWidth = [int][Math]::Ceiling($layout.Width * $fittedScale)
+            $fittedHeight = [int][Math]::Ceiling($layout.Height * $fittedScale)
+            if ($fittedScale -gt 3.0 -or $fittedWidth -gt ($workingArea.Width - 16) -or $fittedHeight -gt ($workingArea.Height - 16)) {
+                throw '详情窗口没有按目标屏幕工作区缩小并保留边距'
+            }
+        }
+
+        $originalTheme = $script:UiThemeOverride
+        $lightPalette = $null
+        $darkPalette = $null
+        foreach ($theme in @('light', 'dark')) {
+            $script:UiThemeOverride = $theme
+            $palette = Get-PopupPalette
+            if ($theme -eq 'light') { $lightPalette = $palette } else { $darkPalette = $palette }
+            foreach ($stateName in @('healthy', 'low', 'empty', 'long-reset', 'snapshot', 'snapshot-error')) {
+                Set-UiPreviewState -State $stateName
+                $status = Get-PopupStatus -Snapshot (Get-CurrentSnapshot) -Palette $palette
+                $expectedStatus = switch ($stateName) {
+                    'healthy' { '实时' }
+                    'low' { '实时' }
+                    'long-reset' { '实时' }
+                    'empty' { '连接中' }
+                    'snapshot' { '快照' }
+                    'snapshot-error' { '连接失败' }
+                }
+                if ($status.Label -ne $expectedStatus) {
+                    throw ('{0} 主题状态显示错误：{1}' -f $theme, $stateName)
+                }
+                $renderBitmap = [Drawing.Bitmap]::new(
+                    $script:PopupForm.ClientSize.Width,
+                    $script:PopupForm.ClientSize.Height,
+                    [Drawing.Imaging.PixelFormat]::Format32bppArgb
+                )
+                $renderGraphics = [Drawing.Graphics]::FromImage($renderBitmap)
+                try {
+                    Draw-Popup -Graphics $renderGraphics
+                    $headerPixel = $renderBitmap.GetPixel([int](320 * $script:PopupScale), [int](72 * $script:PopupScale))
+                    if ($headerPixel.ToArgb() -ne $palette.Background.ToArgb()) {
+                        throw ('{0} 主题背景未正确绘制' -f $theme)
+                    }
+                } finally {
+                    $renderGraphics.Dispose()
+                    $renderBitmap.Dispose()
+                }
+            }
+        }
+        $script:UiThemeOverride = $originalTheme
+        if ($lightPalette.Background.ToArgb() -eq $darkPalette.Background.ToArgb()) {
+            throw '亮色与深色主题没有使用不同的表面颜色'
+        }
+
         Show-Popup
         if (-not $script:PopupForm.Visible) {
             throw '详情窗口无法显示'
@@ -1705,8 +2081,8 @@ function Invoke-UiSelfTest {
             Bounds = [Drawing.Rectangle]::new(0, 0, 1920, 1080)
             WorkingArea = [Drawing.Rectangle]::new(0, 0, 1920, 1040)
         }
-        $testLocation = Get-PopupLocation -AnchorPoint ([Drawing.Point]::new(960, 1060)) -PopupSize ([Drawing.Size]::new(386, 292)) -Screen $testScreen
-        if ($testLocation.X -ne 767 -or $testLocation.Y -ne 740) {
+        $testLocation = Get-PopupLocation -AnchorPoint ([Drawing.Point]::new(960, 1060)) -PopupSize ([Drawing.Size]::new($layout.Width, $layout.Height)) -Screen $testScreen
+        if ($testLocation.X -ne 744 -or $testLocation.Y -ne 672) {
             throw '详情窗口未按托盘图标居中定位'
         }
         Write-Output 'Windows UI self-test passed.'
@@ -1823,6 +2199,11 @@ if ($Probe) {
 
 if ($env:OS -ne 'Windows_NT') {
     throw '此版本只能在 Windows 上运行。'
+}
+
+if (-not [string]::IsNullOrWhiteSpace($UiPreviewPath)) {
+    Invoke-UiPreview -Path $UiPreviewPath -State $UiPreviewState -Theme $UiPreviewTheme -Scale $UiPreviewScale
+    exit 0
 }
 
 if ($UiSelfTest) {
