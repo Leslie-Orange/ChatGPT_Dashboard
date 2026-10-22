@@ -604,6 +604,7 @@ private enum QuotaDesign {
     static let height: CGFloat = 400
     static let inset: CGFloat = 20
     static let cardRadius: CGFloat = 16
+    static let monochromeAccent: Color = .primary
 }
 
 private struct LiquidGlassBackground: View {
@@ -635,6 +636,7 @@ private struct GlassIconButton: View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(QuotaDesign.monochromeAccent)
                 .frame(width: 30, height: 30)
                 .contentShape(Circle())
         }
@@ -743,6 +745,7 @@ private struct QuotaProgress: View {
 private struct QuotaCard: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.colorScheme) private var colorScheme
     let title: String
     let window: QuotaWindow
     let fallbackWindowMinutes: Double
@@ -753,11 +756,20 @@ private struct QuotaCard: View {
 
     private var tint: Color {
         guard let remaining = window.remaining else { return .secondary }
-        return Color(nsColor: remaining < warningThreshold ? .systemOrange : .systemBlue)
+        return remaining < warningThreshold
+            ? Color(nsColor: .systemOrange)
+            : QuotaDesign.monochromeAccent
     }
 
     private var progress: CGFloat {
         CGFloat(min(100, max(0, window.remaining ?? 0)) / 100)
+    }
+
+    private var surfaceOpacity: Double {
+        if contrast == .increased {
+            return colorScheme == .light ? 0.26 : 0.20
+        }
+        return colorScheme == .light ? 0.16 : 0.10
     }
 
     private var consumptionRate: String {
@@ -810,9 +822,14 @@ private struct QuotaCard: View {
         }
         .padding(14)
         .background {
-            // Content uses a quiet system surface; Liquid Glass stays on controls.
-            RoundedRectangle(cornerRadius: QuotaDesign.cardRadius, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor).opacity(reduceTransparency ? 1 : 0.55))
+            let shape = RoundedRectangle(cornerRadius: QuotaDesign.cardRadius, style: .continuous)
+            if reduceTransparency {
+                shape.fill(Color(nsColor: .controlBackgroundColor))
+            } else if #available(macOS 26.0, *) {
+                shape.fill(Color(nsColor: .controlBackgroundColor).opacity(surfaceOpacity))
+            } else {
+                shape.fill(.ultraThinMaterial)
+            }
         }
         .overlay {
             RoundedRectangle(cornerRadius: QuotaDesign.cardRadius, style: .continuous)
@@ -850,7 +867,9 @@ struct QuotaView: View {
     private var statusTint: Color {
         if !model.connectionError.isEmpty { return Color(nsColor: .systemRed) }
         guard currentSnapshot != nil else { return .secondary }
-        return Color(nsColor: model.isLive ? .systemBlue : .systemOrange)
+        return model.isLive
+            ? QuotaDesign.monochromeAccent
+            : Color(nsColor: .systemOrange)
     }
 
     private func quotaCards(now: Date) -> some View {

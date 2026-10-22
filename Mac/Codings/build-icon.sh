@@ -4,10 +4,24 @@ set -euo pipefail
 # Generate all standard macOS 1x/2x representations from the RGBA master.
 ROOT_DIR="${0:A:h}"
 SOURCE_FILE="$ROOT_DIR/AppIcon.png"
+SVG_FILE="$ROOT_DIR/AppIcon.svg"
+RENDERER_FILE="$ROOT_DIR/render-icon.swift"
 TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/quota-icon.XXXXXX")"
 trap 'rm -rf "$TEMP_DIR"' EXIT
 ICONSET_DIR="$TEMP_DIR/AppIcon.iconset"
 mkdir -p "$ICONSET_DIR"
+
+if ! command -v swift >/dev/null 2>&1; then
+    print -u2 "找不到 swift，请先安装 Xcode Command Line Tools。"
+    exit 1
+fi
+
+# Render in the temporary directory, then copy the generated masters into place.
+RENDERED_PNG="$TEMP_DIR/AppIcon.png"
+RENDERED_SVG="$TEMP_DIR/AppIcon.svg"
+swift "$RENDERER_FILE" --png "$RENDERED_PNG" --svg "$RENDERED_SVG"
+cp "$RENDERED_PNG" "$SOURCE_FILE"
+cp "$RENDERED_SVG" "$SVG_FILE"
 
 for size in 16 32 128 256 512; do
     sips -z "$size" "$size" "$SOURCE_FILE" --out "$ICONSET_DIR/icon_${size}x${size}.png" >/dev/null
