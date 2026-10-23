@@ -960,6 +960,104 @@ struct QuotaView: View {
     }
 }
 
+enum QuotaStatusIcon {
+    private static let iconSize = NSSize(width: 20, height: 20)
+
+    static func image(primary: Double?, secondary: Double?) -> NSImage {
+        let primaryFraction = normalizedFraction(primary)
+        let secondaryFraction = normalizedFraction(secondary)
+        let image = NSImage(size: iconSize, flipped: false) { _ in
+            guard let context = NSGraphicsContext.current?.cgContext else { return false }
+            context.saveGState()
+            defer { context.restoreGState() }
+            context.setShouldAntialias(true)
+
+            drawScallopedOutline()
+            drawPrompt()
+            drawMeter(atY: 12.7, fraction: primaryFraction)
+            drawMeter(atY: 7.3, fraction: secondaryFraction)
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }
+
+    private static func normalizedFraction(_ value: Double?) -> Double? {
+        guard let value, value.isFinite else { return nil }
+        return min(100, max(0, value)) / 100
+    }
+
+    private static func drawScallopedOutline() {
+        let samples = 96
+        let center = NSPoint(x: 10, y: 10)
+        let path = NSBezierPath()
+        path.lineWidth = 1.35
+        path.lineJoinStyle = .round
+
+        for index in 0...samples {
+            let angle = Double(index) / Double(samples) * 2 * Double.pi
+            let radius = 7.55 + 0.35 * cos(angle * 6)
+            let point = NSPoint(
+                x: center.x + CGFloat(cos(angle) * radius),
+                y: center.y + CGFloat(sin(angle) * radius)
+            )
+            if index == 0 {
+                path.move(to: point)
+            } else {
+                path.line(to: point)
+            }
+        }
+        path.close()
+        NSColor.black.setStroke()
+        path.stroke()
+    }
+
+    private static func drawPrompt() {
+        let path = NSBezierPath()
+        path.lineWidth = 1.35
+        path.lineCapStyle = .round
+        path.lineJoinStyle = .round
+        path.move(to: NSPoint(x: 5.1, y: 7.35))
+        path.line(to: NSPoint(x: 7.2, y: 10))
+        path.line(to: NSPoint(x: 5.1, y: 12.65))
+        NSColor.black.setStroke()
+        path.stroke()
+    }
+
+    private static func drawMeter(atY y: CGFloat, fraction: Double?) {
+        let startX: CGFloat = 9.15
+        let endX: CGFloat = 15.3
+        let track = NSBezierPath()
+        track.lineWidth = 1.05
+        track.lineCapStyle = .round
+
+        if fraction == nil {
+            // Dashed neutral rails distinguish unknown from a known zero quota.
+            var x = startX
+            while x < endX {
+                track.move(to: NSPoint(x: x, y: y))
+                track.line(to: NSPoint(x: min(x + 0.9, endX), y: y))
+                x += 1.7
+            }
+            NSColor.black.withAlphaComponent(0.38).setStroke()
+        } else {
+            track.move(to: NSPoint(x: startX, y: y))
+            track.line(to: NSPoint(x: endX, y: y))
+            NSColor.black.withAlphaComponent(0.20).setStroke()
+        }
+        track.stroke()
+
+        guard let fraction, fraction > 0 else { return }
+        let fill = NSBezierPath()
+        fill.lineWidth = 1.4
+        fill.lineCapStyle = .round
+        fill.move(to: NSPoint(x: startX, y: y))
+        fill.line(to: NSPoint(x: startX + (endX - startX) * CGFloat(fraction), y: y))
+        NSColor.black.setStroke()
+        fill.stroke()
+    }
+}
+
 final class QuotaStatusView: NSView {
     var onLeftClick: (() -> Void)?
     var onRightClick: (() -> Void)?
@@ -973,6 +1071,9 @@ final class QuotaStatusView: NSView {
     private let primaryLabel = NSTextField(labelWithString: "5h —")
     private let secondaryLabel = NSTextField(labelWithString: "7d —")
     private var isPressed = false
+    private var hasRenderedIcon = false
+    private var lastIconPrimary: Double?
+    private var lastIconSecondary: Double?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -980,10 +1081,8 @@ final class QuotaStatusView: NSView {
         setAccessibilityRole(.button)
         setAccessibilityLabel("Codex 剩余额度")
 
-        iconView.image = NSImage(systemSymbolName: "gauge.medium", accessibilityDescription: "Codex 额度")
-        iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 18, weight: .medium)
         iconView.imageScaling = .scaleProportionallyUpOrDown
-        iconView.contentTintColor = .secondaryLabelColor
+        iconView.contentTintColor = .labelColor
         addSubview(iconView)
 
         for label in [primaryLabel, secondaryLabel] {
@@ -1034,10 +1133,24 @@ final class QuotaStatusView: NSView {
     func update(primary: Double?, secondary: Double?, sourceName: String?) {
         primaryLabel.stringValue = "5h \(QuotaFormatter.percent(primary))"
         secondaryLabel.stringValue = "7d \(QuotaFormatter.percent(secondary))"
+        let iconPrimary = normalizedIconValue(primary)
+        let iconSecondary = normalizedIconValue(secondary)
+        if !hasRenderedIcon || lastIconPrimary != iconPrimary || lastIconSecondary != iconSecondary {
+            iconView.image = QuotaStatusIcon.image(primary: iconPrimary, secondary: iconSecondary)
+            lastIconPrimary = iconPrimary
+            lastIconSecondary = iconSecondary
+            hasRenderedIcon = true
+        }
         let source = sourceName == "app-server" ? "实时" : (sourceName == nil ? "等待数据" : "快照")
-        toolTip = "Codex 额度 · \(source)"
+        toolTip = "Codex 额度 · \(source)\n5 小时剩余 \(QuotaFormatter.percent(primary))\n7 天剩余 \(QuotaFormatter.percent(secondary))"
+        setAccessibilityValue("5 小时剩余 \(QuotaFormatter.percent(primary))，7 天剩余 \(QuotaFormatter.percent(secondary))，\(source)")
         needsLayout = true
         needsDisplay = true
+    }
+
+    private func normalizedIconValue(_ value: Double?) -> Double? {
+        guard let value, value.isFinite else { return nil }
+        return min(100, max(0, value))
     }
 
     override func draw(_ dirtyRect: NSRect) {
