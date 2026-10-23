@@ -389,7 +389,7 @@ final class CodexAppServerClient {
 
 enum QuotaFormatter {
     static func percent(_ value: Double?) -> String {
-        guard let value else { return "—" }
+        guard let value, value.isFinite else { return "—" }
         return String(format: "%.0f%%", value)
     }
 
@@ -604,7 +604,26 @@ private enum QuotaDesign {
     static let height: CGFloat = 400
     static let inset: CGFloat = 20
     static let cardRadius: CGFloat = 16
-    static let monochromeAccent: Color = .primary
+
+    static func accent(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark
+            ? Color(red: 0.78, green: 0.64, blue: 1.00)
+            : Color(red: 0.47, green: 0.21, blue: 0.91)
+    }
+
+    static func quotaGradient(for colorScheme: ColorScheme) -> LinearGradient {
+        let colors = colorScheme == .dark
+            ? [Color(red: 0.52, green: 0.61, blue: 1.00), Color(red: 0.76, green: 0.48, blue: 1.00), Color(red: 0.63, green: 0.34, blue: 1.00)]
+            : [Color(red: 0.40, green: 0.47, blue: 0.96), Color(red: 0.65, green: 0.40, blue: 0.96), Color(red: 0.50, green: 0.19, blue: 0.91)]
+        return LinearGradient(colors: colors, startPoint: .leading, endPoint: .trailing)
+    }
+
+    static func warningGradient(for colorScheme: ColorScheme) -> LinearGradient {
+        let colors = colorScheme == .dark
+            ? [Color(red: 1.00, green: 0.70, blue: 0.35), Color(red: 1.00, green: 0.52, blue: 0.25), Color(red: 0.98, green: 0.40, blue: 0.24)]
+            : [Color(red: 1.00, green: 0.65, blue: 0.30), Color(red: 0.97, green: 0.49, blue: 0.22), Color(red: 0.86, green: 0.34, blue: 0.18)]
+        return LinearGradient(colors: colors, startPoint: .leading, endPoint: .trailing)
+    }
 }
 
 private struct LiquidGlassBackground: View {
@@ -629,6 +648,7 @@ private struct GlassIconButton: View {
     let accessibilityLabel: String
     let action: () -> Void
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorScheme) private var colorScheme
     @State private var cursorID = UUID()
     @State private var cursorBounds = CGSize(width: 30, height: 30)
 
@@ -636,7 +656,7 @@ private struct GlassIconButton: View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(QuotaDesign.monochromeAccent)
+                .foregroundStyle(QuotaDesign.accent(for: colorScheme))
                 .frame(width: 30, height: 30)
                 .contentShape(Circle())
         }
@@ -723,20 +743,100 @@ private struct QuotaToolbar: View {
     }
 }
 
+private struct QuotaParticleField: View {
+    let reduceMotion: Bool
+
+    @ViewBuilder
+    var body: some View {
+        if reduceMotion {
+            Canvas { context, size in
+                Self.draw(in: &context, size: size, time: 0, reduceMotion: true)
+            }
+        } else {
+            TimelineView(.periodic(from: .now, by: 3.0)) { timeline in
+                Canvas { context, size in
+                    Self.draw(
+                        in: &context,
+                        size: size,
+                        time: timeline.date.timeIntervalSinceReferenceDate,
+                        reduceMotion: false
+                    )
+                }
+            }
+        }
+    }
+
+    private static func draw(
+        in context: inout GraphicsContext,
+        size: CGSize,
+        time: TimeInterval,
+        reduceMotion: Bool
+    ) {
+        // About 4.5 stable, deterministically placed particles per 100 pt.
+        let count = max(0, Int(size.width / 22))
+        guard count > 0 else { return }
+
+        for index in 0..<count {
+            let seed = Double(index + 1) * 12.9898
+            let baseX = 0.06 + unit(seed) * 0.88
+            let y = (0.20 + unit(seed + 31.4) * 0.60) * size.height
+            let diameter = 0.7 + unit(seed + 91.7)
+            let drift = reduceMotion ? 0 : sin(time * 0.34 + seed) * 0.48
+            let opacity = reduceMotion
+                ? 0.48
+                : 0.26 + 0.48 * (0.5 + 0.5 * sin(time * 0.53 + seed * 0.7))
+            let rect = CGRect(
+                x: baseX * size.width + drift - diameter / 2,
+                y: y - diameter / 2,
+                width: diameter,
+                height: diameter
+            )
+            context.fill(
+                Path(ellipseIn: rect),
+                with: .color(.white.opacity(opacity))
+            )
+        }
+    }
+
+    private static func unit(_ value: Double) -> Double {
+        let value = sin(value * 127.1) * 43_758.5453
+        return value - floor(value)
+    }
+}
+
 private struct QuotaProgress: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
     let progress: CGFloat
-    let tint: Color
+    let remaining: Double?
+    let isWarning: Bool
+
+    private var fill: LinearGradient {
+        isWarning
+            ? QuotaDesign.warningGradient(for: colorScheme)
+            : QuotaDesign.quotaGradient(for: colorScheme)
+    }
 
     var body: some View {
         GeometryReader { geometry in
             ZStack(alignment: .leading) {
-                Capsule().fill(.primary.opacity(0.08))
-                Capsule().fill(tint)
-                    .frame(width: geometry.size.width * progress)
+                Capsule().fill(.primary.opacity(colorScheme == .dark ? 0.16 : 0.09))
+                if remaining != nil {
+                    Capsule()
+                        .fill(fill)
+                        .frame(width: geometry.size.width * progress)
+                        .overlay {
+                            if !isWarning, let remaining, remaining > 0 {
+                                QuotaParticleField(reduceMotion: reduceMotion)
+                                    .clipShape(Capsule())
+                                    .accessibilityHidden(true)
+                            }
+                        }
+                        .clipShape(Capsule())
+                }
             }
         }
-        .frame(height: 4)
+        .frame(height: 11)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.35), value: progress)
         .accessibilityHidden(true)
     }
@@ -754,15 +854,25 @@ private struct QuotaCard: View {
     let warningThreshold: Double
     let now: Date
 
-    private var tint: Color {
-        guard let remaining = window.remaining else { return .secondary }
+    private var normalizedRemaining: Double? {
+        guard let remaining = window.remaining, remaining.isFinite else { return nil }
+        return min(100, max(0, remaining))
+    }
+
+    private var isWarning: Bool {
+        guard let remaining = normalizedRemaining else { return false }
         return remaining < warningThreshold
+    }
+
+    private var tint: Color {
+        guard normalizedRemaining != nil else { return .secondary }
+        return isWarning
             ? Color(nsColor: .systemOrange)
-            : QuotaDesign.monochromeAccent
+            : QuotaDesign.accent(for: colorScheme)
     }
 
     private var progress: CGFloat {
-        CGFloat(min(100, max(0, window.remaining ?? 0)) / 100)
+        CGFloat((normalizedRemaining ?? 0) / 100)
     }
 
     private var surfaceOpacity: Double {
@@ -817,8 +927,8 @@ private struct QuotaCard: View {
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
 
-            QuotaProgress(progress: progress, tint: tint)
-                .opacity(window.remaining == nil ? 0 : 1)
+            QuotaProgress(progress: progress, remaining: normalizedRemaining, isWarning: isWarning)
+                .opacity(normalizedRemaining == nil ? 0 : 1)
         }
         .padding(14)
         .background {
@@ -833,7 +943,12 @@ private struct QuotaCard: View {
         }
         .overlay {
             RoundedRectangle(cornerRadius: QuotaDesign.cardRadius, style: .continuous)
-                .strokeBorder(.primary.opacity(contrast == .increased ? 0.3 : 0.07), lineWidth: 1)
+                .strokeBorder(
+                    contrast == .increased
+                        ? Color.primary.opacity(0.32)
+                        : QuotaDesign.accent(for: colorScheme).opacity(colorScheme == .dark ? 0.22 : 0.14),
+                    lineWidth: 1
+                )
         }
         .accessibilityElement(children: .combine)
     }
@@ -843,6 +958,7 @@ struct QuotaView: View {
     @ObservedObject var model: QuotaModel
     let refresh: () -> Void
     let dismiss: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
 
     private let placeholder = QuotaWindow(remaining: nil, used: nil, resetAt: nil, windowMinutes: nil)
 
@@ -868,7 +984,7 @@ struct QuotaView: View {
         if !model.connectionError.isEmpty { return Color(nsColor: .systemRed) }
         guard currentSnapshot != nil else { return .secondary }
         return model.isLive
-            ? QuotaDesign.monochromeAccent
+            ? QuotaDesign.accent(for: colorScheme)
             : Color(nsColor: .systemOrange)
     }
 
@@ -918,6 +1034,7 @@ struct QuotaView: View {
                 HStack(alignment: .center) {
                     Text(planTitle)
                         .font(.system(size: 21, weight: .semibold))
+                        .foregroundStyle(QuotaDesign.accent(for: colorScheme))
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .help(planTitle)
@@ -1026,7 +1143,7 @@ enum QuotaStatusIcon {
 
     private static func drawMeter(atY y: CGFloat, fraction: Double?) {
         let startX: CGFloat = 9.15
-        let endX: CGFloat = 15.3
+        let endX: CGFloat = 14.3
         let track = NSBezierPath()
         track.lineWidth = 1.05
         track.lineCapStyle = .round

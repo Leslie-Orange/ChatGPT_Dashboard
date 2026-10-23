@@ -11,20 +11,23 @@ private enum Icon {
     static let squircleExponent = 4.0
     static let tileSamples = 256
 
-    static let tileFill = "#FCFCFB"
-    static let tileStroke = "#E7E7E5"
-    static let tileStrokeWidth = 4.0
+    static let tileFill = "#FCFCFD"
 
-    static let trackFill = "#E3E3E1"
-    static let barFill = "#171717"
+    struct GaugeSection: Decodable {
+        let color: String
+        let paths: [String]
+    }
 
-    static let trackX = 232.0
-    static let trackWidth = 560.0
-    static let trackHeight = 112.0
-    static let firstTrackY = 350.0
-    static let secondTrackY = 562.0
-    static let firstProgress = 0.75
-    static let secondProgress = 0.45
+    struct Shapes: Decodable {
+        let knot: [String]
+        let gauge: [GaugeSection]
+    }
+
+    static func shapes() throws -> Shapes {
+        let sourceURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("AppIcon-shapes.json")
+        return try JSONDecoder().decode(Shapes.self, from: Data(contentsOf: sourceURL))
+    }
 
     static var tilePoints: [CGPoint] {
         (0..<tileSamples).map { index in
@@ -36,6 +39,10 @@ private enum Icon {
                 y: rounded(tileCenter + tileHalfSize * sine)
             )
         }
+    }
+
+    static func rounded(_ value: Double) -> Double {
+        (value * 1000.0).rounded() / 1000.0
     }
 
     static var tilePathData: String {
@@ -50,34 +57,31 @@ private enum Icon {
         }.joined(separator: "\n      ")
     }
 
-    static func rounded(_ value: Double) -> Double {
-        (value * 1000.0).rounded() / 1000.0
-    }
-
     static func coordinate(_ value: CGFloat) -> String {
         String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), Double(value))
     }
 
-    static func svgDocument() -> String {
+    static func svgDocument(shapes: Shapes) -> String {
         let path = tilePathData
-        let firstWidth = trackWidth * firstProgress
-        let secondWidth = trackWidth * secondProgress
+        let gaugePaths = shapes.gauge.map { section in
+            section.paths.map { "<path d=\"\($0)\" fill=\"\(section.color)\"/>" }
+                .joined(separator: "\n    ")
+        }.joined(separator: "\n    ")
+        let knotPaths = shapes.knot.map { "<path d=\"\($0)\" fill=\"#000000\"/>" }
+            .joined(separator: "\n    ")
 
         return """
         <?xml version="1.0" encoding="UTF-8"?>
         <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-          <title>Quota dashboard</title>
+          <title>Quota dashboard — woven knot and six-step gauge</title>
           <defs>
             <clipPath id="tile-clip" clipPathUnits="userSpaceOnUse">
               <path d="\(path)"/>
             </clipPath>
           </defs>
           <path d="\(path)" fill="\(tileFill)"/>
-          <path d="\(path)" fill="none" stroke="\(tileStroke)" stroke-width="\(coordinate(tileStrokeWidth))" clip-path="url(#tile-clip)"/>
-          <rect x="\(coordinate(trackX))" y="\(coordinate(firstTrackY))" width="\(coordinate(trackWidth))" height="\(coordinate(trackHeight))" rx="\(coordinate(trackHeight / 2) )" fill="\(trackFill)"/>
-          <rect x="\(coordinate(trackX))" y="\(coordinate(firstTrackY))" width="\(coordinate(firstWidth))" height="\(coordinate(trackHeight))" rx="\(coordinate(trackHeight / 2) )" fill="\(barFill)"/>
-          <rect x="\(coordinate(trackX))" y="\(coordinate(secondTrackY))" width="\(coordinate(trackWidth))" height="\(coordinate(trackHeight))" rx="\(coordinate(trackHeight / 2) )" fill="\(trackFill)"/>
-          <rect x="\(coordinate(trackX))" y="\(coordinate(secondTrackY))" width="\(coordinate(secondWidth))" height="\(coordinate(trackHeight))" rx="\(coordinate(trackHeight / 2) )" fill="\(barFill)"/>
+          <g fill-rule="evenodd">\(gaugePaths)</g>
+          <g fill-rule="evenodd">\(knotPaths)</g>
         </svg>
         """
     }
@@ -124,11 +128,9 @@ private func color(_ hex: String) -> CGColor {
     let digits = String(hex.dropFirst())
     let value = UInt64(digits, radix: 16)!
     return CGColor(
-        red: CGFloat((value >> 16) & 0xFF) / 255.0,
-        green: CGFloat((value >> 8) & 0xFF) / 255.0,
-        blue: CGFloat(value & 0xFF) / 255.0,
-        alpha: 1.0
-    )
+        colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
+        components: [CGFloat((value >> 16) & 0xFF) / 255.0, CGFloat((value >> 8) & 0xFF) / 255.0, CGFloat(value & 0xFF) / 255.0, 1.0]
+    )!
 }
 
 private func makeTilePath() -> CGPath {
@@ -143,16 +145,60 @@ private func makeTilePath() -> CGPath {
     return path
 }
 
-private func drawCapsule(context: CGContext, y: Double, width: Double, fill: String) {
-    let rect = CGRect(x: Icon.trackX, y: y, width: width, height: Icon.trackHeight)
-    let path = CGPath(roundedRect: rect, cornerWidth: Icon.trackHeight / 2, cornerHeight: Icon.trackHeight / 2, transform: nil)
-    context.addPath(path)
-    context.setFillColor(color(fill))
-    context.fillPath()
+private func makeVectorPath(from source: String) throws -> CGPath {
+    let expression = try NSRegularExpression(pattern: #"[A-Z]|[-+]?(?:\d*\.\d+|\d+\.?\d*)(?:[eE][-+]?\d+)?"#)
+    let range = NSRange(source.startIndex..<source.endIndex, in: source)
+    let tokens = expression.matches(in: source, range: range).compactMap {
+        Range($0.range, in: source).map { String(source[$0]) }
+    }
+
+    let path = CGMutablePath()
+    var index = 0
+    var hasOpenSubpath = false
+    while index < tokens.count {
+        let command = tokens[index]
+        index += 1
+        func number() throws -> CGFloat {
+            guard index < tokens.count, let value = Double(tokens[index]) else {
+                throw NSError(domain: "render-icon", code: 6, userInfo: [NSLocalizedDescriptionKey: "Invalid vector path data"])
+            }
+            index += 1
+            return CGFloat(value)
+        }
+
+        switch command {
+        case "M":
+            if hasOpenSubpath { path.closeSubpath() }
+            path.move(to: CGPoint(x: try number(), y: try number()))
+            hasOpenSubpath = true
+        case "L":
+            path.addLine(to: CGPoint(x: try number(), y: try number()))
+        case "C":
+            let first = CGPoint(x: try number(), y: try number())
+            let second = CGPoint(x: try number(), y: try number())
+            let end = CGPoint(x: try number(), y: try number())
+            path.addCurve(to: end, control1: first, control2: second)
+        case "Z":
+            path.closeSubpath()
+            hasOpenSubpath = false
+        default:
+            throw NSError(domain: "render-icon", code: 7, userInfo: [NSLocalizedDescriptionKey: "Unsupported vector path command: \(command)"])
+        }
+    }
+    if hasOpenSubpath { path.closeSubpath() }
+    return path
 }
 
-private func renderPNG(to outputURL: URL) throws {
-    let colorSpace = CGColorSpaceCreateDeviceRGB()
+private func fillPaths(_ paths: [String], in context: CGContext, color fill: String) throws {
+    context.setFillColor(color(fill))
+    for pathData in paths {
+        context.addPath(try makeVectorPath(from: pathData))
+    }
+    context.drawPath(using: .eoFill)
+}
+
+private func renderPNG(to outputURL: URL, shapes: Icon.Shapes) throws {
+    let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
     let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue)
     guard let context = CGContext(
         data: nil,
@@ -179,19 +225,10 @@ private func renderPNG(to outputURL: URL) throws {
     context.setFillColor(color(Icon.tileFill))
     context.fillPath()
 
-    context.saveGState()
-    context.addPath(tilePath)
-    context.clip()
-    context.addPath(tilePath)
-    context.setStrokeColor(color(Icon.tileStroke))
-    context.setLineWidth(Icon.tileStrokeWidth)
-    context.strokePath()
-    context.restoreGState()
-
-    drawCapsule(context: context, y: Icon.firstTrackY, width: Icon.trackWidth, fill: Icon.trackFill)
-    drawCapsule(context: context, y: Icon.firstTrackY, width: Icon.trackWidth * Icon.firstProgress, fill: Icon.barFill)
-    drawCapsule(context: context, y: Icon.secondTrackY, width: Icon.trackWidth, fill: Icon.trackFill)
-    drawCapsule(context: context, y: Icon.secondTrackY, width: Icon.trackWidth * Icon.secondProgress, fill: Icon.barFill)
+    for section in shapes.gauge {
+        try fillPaths(section.paths, in: context, color: section.color)
+    }
+    try fillPaths(shapes.knot, in: context, color: "#000000")
 
     context.restoreGState()
 
@@ -207,9 +244,10 @@ private func renderPNG(to outputURL: URL) throws {
 
 do {
     let outputs = try parseArguments()
-    try renderPNG(to: outputs.png)
+    let shapes = try Icon.shapes()
+    try renderPNG(to: outputs.png, shapes: shapes)
     if let svgURL = outputs.svg {
-        try Icon.svgDocument().write(to: svgURL, atomically: true, encoding: .utf8)
+        try Icon.svgDocument(shapes: shapes).write(to: svgURL, atomically: true, encoding: .utf8)
     }
     print("Rendered 1024x1024 RGBA icon: \(outputs.png.path)")
     if let svgURL = outputs.svg {
